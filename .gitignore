@@ -16,3 +16,7 @@ runtime/pandoc/pandoc.exe
 # 打包时生成的，记「这个包是哪个 Release」。开发环境里它只是残留，
 # 不该进版本库 —— 谁 clone 下来都会带着一个别人的版本号。
 version.json
+
+# macOS 打包的中间产物（CI 里现搭，不进库）
+dist-mac/
+runtime-mac/

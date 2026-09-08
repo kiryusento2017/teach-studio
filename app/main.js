@@ -21,9 +21,19 @@ const { spawn } = require('child_process');
 // 都是），这样 electron.exe 改个名就能双击直接开 —— 不用再弹个 cmd 黑框
 // 去调它。判断依据是父目录叫不叫 resources，不依赖 app.isPackaged
 // （我们没打 asar，那个标志不可靠）。
-const ROOT = path.basename(path.dirname(__dirname)) === 'resources'
-  ? path.join(__dirname, '..', '..')
-  : path.join(__dirname, '..');
+//
+// 🔴 **两处平台差异，少一处 mac 版就起不来**：
+//   1. 目录名 Windows 是 `resources`、macOS 是 `Resources` —— 必须忽略大小写
+//   2. 布局不一样。Windows 发行版把 pipeline/ server/ runtime/ 摊在安装根，
+//      resources/ 只是 Electron 自己的一层，所以要往上跳两级；
+//      macOS 是 electron-builder 的 extraResources，东西就落在
+//      `Xxx.app/Contents/Resources/` 里，跳一级即可。
+const _upName = path.basename(path.dirname(__dirname)).toLowerCase();
+const ROOT = _upName !== 'resources'
+  ? path.join(__dirname, '..')                 // 开发环境：app/ 的上一级
+  : process.platform === 'darwin'
+    ? path.dirname(__dirname)                  // macOS：Contents/Resources
+    : path.join(__dirname, '..', '..');        // Windows：安装根
 const SERVER = path.join(ROOT, 'server', 'main.py');
 
 // 🔴 Python 的位置：发行版和开发环境不一样，按顺序找。

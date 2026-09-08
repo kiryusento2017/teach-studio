@@ -20,9 +20,27 @@ import sys
 # 开发环境同构，所以两边算出来一样。
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-TMP = os.path.join(ROOT, '_tmp')          # 下载解压的中转站，用完即删
-LOGS = os.path.join(ROOT, 'logs')         # 日志 + 转换历史 + token
-RUNTIME = os.path.join(ROOT, 'runtime')   # 打包进来的 pandoc / node
+RUNTIME = os.path.join(ROOT, 'runtime')   # 打包进来的 pandoc / node —— 只读，跟着安装目录走
+
+# 🔴 **要写的东西不能放安装目录里 —— macOS 上那儿是只读的。**
+#
+# Windows 发行版是自解压到用户自己选的文件夹，往旁边写 logs/ 没问题，
+# 老用户的 token 也都在那儿，不能动。
+#
+# macOS 的 .app 装进 /Applications 之后不该被写（有签名的话写了就破坏签名），
+# Apple 指定应用自己管理的数据放 ~/Library/Application Support/<标识>/，
+# 缓存放 ~/Library/Caches/<标识>/。照办。
+_MAC_ID = 'teach-studio'
+IS_MAC = sys.platform == 'darwin'
+
+if IS_MAC:
+    _support = os.path.expanduser(os.path.join('~', 'Library', 'Application Support', _MAC_ID))
+    _caches = os.path.expanduser(os.path.join('~', 'Library', 'Caches', _MAC_ID))
+    TMP = os.path.join(_caches, '_tmp')   # 下载解压的中转站，用完即删
+    LOGS = os.path.join(_support, 'logs')  # 日志 + 转换历史 + token
+else:
+    TMP = os.path.join(ROOT, '_tmp')
+    LOGS = os.path.join(ROOT, 'logs')
 
 
 def ensure(path):

@@ -10,6 +10,49 @@
     "start": "electron ."
   },
   "devDependencies": {
-    "electron": "^44.0.0"
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "top.thcyx.teach-studio",
+    "productName": "PDF转Word",
+    "directories": {
+      "output": "../dist-mac"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../pipeline",
+        "to": "pipeline",
+        "filter": ["**/*", "!__pycache__/**", "!vendor/**/__pycache__/**"]
+      },
+      {
+        "from": "../server",
+        "to": "server",
+        "filter": ["**/*", "!__pycache__/**"]
+      },
+      {
+        "from": "../version.json",
+        "to": "version.json"
+      },
+      {
+        "from": "../runtime-mac",
+        "to": "runtime"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg" },
+        { "target": "zip" }
+      ],
+      "identity": null,
+      "artifactName": "teach-studio-${version}-mac-${arch}.${ext}"
+    }
   }
 }

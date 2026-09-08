@@ -1,0 +1,137 @@
+# macOS 包（Intel + Apple Silicon）
+#
+# 为什么必须在真机 CI 上打，不在 Windows 上交叉编译：
+#   1. pymupdf / lxml 带 C 扩展，pip 装哪个 wheel 由跑 pip 的那台机器的架构决定
+#   2. .app 里的可执行位和符号链接，在 Windows 文件系统上组装会丢
+#
+# 🔴 两条注意：
+#   · macos-15-intel 是 GitHub 最后一个 x86_64 镜像，2027-08 到期。到期后
+#     Intel 这条腿就没了（Apple 自己已停止支持 x86_64）。
+#   · 包**没有签名也没有公证**。用户首次打开要在「设置 → 隐私与安全性」点
+#     "仍要打开"，或者终端跑 xattr -rd com.apple.quarantine。要免掉这步，
+#     得买 Apple Developer（99 美元/年）配证书，再开 electron-builder 的 notarize。
+
+name: 构建 macOS 包
+
+on:
+  workflow_dispatch:          # 手动触发，跑之前先在 Actions 页面点一下
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  PANDOC_VER: '3.11'
+  PY_VER: '3.12.14'
+  PY_BUILD: '20260901'        # python-build-standalone 的 release tag
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false        # 一个架构挂了，另一个照样出包
+      matrix:
+        include:
+          - label: Apple Silicon (arm64)
+            runner: macos-latest
+            arch: arm64
+            pandoc_arch: arm64
+            py_arch: aarch64
+          - label: Intel (x64)
+            runner: macos-15-intel
+            arch: x64
+            pandoc_arch: x86_64
+            py_arch: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 确认这台机器的架构对得上
+        run: |
+          set -eux
+          uname -m
+          test "$(uname -s)" = "Darwin"
+
+      - name: 搭 mac 专用 runtime（pandoc / xsl / node）
+        run: |
+          set -euxo pipefail
+          mkdir -p runtime-mac/pandoc runtime-mac/xsl
+
+          # pandoc：官方 macOS 二进制，分架构
+          curl -fsSL -o /tmp/pandoc.zip \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-${{ matrix.pandoc_arch }}-macOS.zip"
+          unzip -q /tmp/pandoc.zip -d /tmp/pandoc
+          cp "/tmp/pandoc/pandoc-${PANDOC_VER}/bin/pandoc" runtime-mac/pandoc/pandoc
+          chmod +x runtime-mac/pandoc/pandoc
+          cp "/tmp/pandoc/pandoc-${PANDOC_VER}/COPYRIGHT.txt" runtime-mac/pandoc/ || true
+
+          # XSL：转公式用的，仓库里有，跟 Windows 版同一份
+          cp runtime/xsl/MML2OMML.XSL runtime-mac/xsl/
+
+          # node：跑 KaTeX 用。直接拿 runner 上 setup-node 装的那个
+          cp "$(command -v node)" runtime-mac/node
+          chmod +x runtime-mac/node
+
+          runtime-mac/pandoc/pandoc --version | head -1
+          runtime-mac/node --version
+
+      - name: 装 Python 运行时（python-build-standalone）
+        run: |
+          set -euxo pipefail
+          # macOS 没有官方 embeddable zip，用 python-build-standalone 顶上。
+          # install_only 版本自带 pip，解压出来就是 python/bin/python3。
+          curl -fsSL -o /tmp/py.tar.gz \
+            "https://github.com/astral-sh/python-build-standalone/releases/download/${PY_BUILD}/cpython-${PY_VER}+${PY_BUILD}-${{ matrix.py_arch }}-apple-darwin-install_only.tar.gz"
+          tar -xzf /tmp/py.tar.gz -C /tmp
+          mv /tmp/python runtime-mac/python
+          runtime-mac/python/bin/python3 --version
+
+      - name: 装 Python 依赖
+        run: |
+          set -euxo pipefail
+          PY=runtime-mac/python/bin/python3
+          "$PY" -m pip install --upgrade pip
+          # 跟 tools/build_release.py 的 DEPS 保持一致
+          "$PY" -m pip install pymupdf lxml fastapi uvicorn pydantic requests
+          # 带 C 扩展的两个，验证真能 import（架构不对这里就会炸）
+          "$PY" -c "import pymupdf, lxml.etree, fastapi, uvicorn, pydantic, requests; print('依赖 OK')"
+
+      - name: 打包
+        working-directory: app
+        run: |
+          set -euxo pipefail
+          npm install
+          npx electron-builder --mac --${{ matrix.arch }} --publish never
+
+      - name: 冒烟测试（.app 里该有的东西在不在）
+        run: |
+          set -euxo pipefail
+          APP=$(find dist-mac -maxdepth 2 -name '*.app' -print -quit)
+          test -n "$APP"
+          RES="$APP/Contents/Resources"
+          test -f "$RES/server/main.py"
+          test -f "$RES/pipeline/paths.py"
+          test -x "$RES/runtime/pandoc/pandoc"
+          test -x "$RES/runtime/node"
+          test -f "$RES/runtime/xsl/MML2OMML.XSL"
+          test -x "$RES/runtime/python/bin/python3"
+          # 后端能不能在这套运行时下被导入（不起 GUI，只验 import 链）
+          # 🔴 写成一行：run: | 是块标量，内嵌代码顶格会把块提前截断（YAML 报错）
+          "$RES/runtime/python/bin/python3" -c "import sys; sys.path.insert(0, '$RES/pipeline'); import paths, store, mineru_api, todocx, tomath; print('LOGS ->', paths.LOGS); assert paths.IS_MAC, 'IS_MAC should be True'; assert 'Library/Application Support' in paths.LOGS, 'LOGS not under Application Support'; assert paths.find_exe('pandoc', ('pandoc',)), 'pandoc not found'; print('backend import OK')"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: teach-studio-mac-${{ matrix.arch }}
+          path: |
+            dist-mac/*.dmg
+            dist-mac/*.zip
+          if-no-files-found: error
+          retention-days: 30
