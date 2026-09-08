@@ -63,7 +63,7 @@ function mkSandbox() {
     pickFiles: () => Promise.resolve([]),
     pickDir: () => Promise.resolve(''),
     pickOutDir: () => Promise.resolve(''),
-    openFile: () => {}, openPath: () => {}, openUrl: () => {},
+    openFile: () => {}, openPath: () => {},
     pathForFile: (f) => f.path,
   };
   sb.window.addEventListener = (k, f) => { listeners[k] = f; };
@@ -537,40 +537,46 @@ ck('轮询撞到任务不存在时要停下来', () => {
 console.log('');
 console.log('外壳与前端的接缝：');
 
-ck('前端要打开的网址必须在主进程白名单里', () => {
-  // 2026-09-08 真撞上：白名单是从 pdf_to_word 原样搬来的，里面全是
-  // NVIDIA 驱动 / VC 运行库 / Node.js，而「去哪申请？」要开的 mineru.net
-  // 不在里面 —— 点了会被静默拒绝，用户完全不知道为什么。
+ck('不许有弹浏览器的通道', () => {
+  // 🔴 2026-09-08 作者定的：**这个软件不弹浏览器。**
   //
-  // 🔴 这里扫的是 actions.js 里**所有 https 字面量**，不是 `openUrl('...')`
-  //    这个写法。2026-09-08 把地址提成常量（openUrl(TOKEN_URL)）之后，
-  //    原来那条正则一个都匹配不到，测试却「通过」了 —— 只匹配调用现场
-  //    等于把检查建在写法上，换个写法就漏。
-  const acts = R('app/renderer/actions.js');
-  const shell = R('app/main.js');
-  const urls = [];
-  const re = /['"](https:\/\/[^'"]+)['"]/g;
-  let m;
-  while ((m = re.exec(acts))) urls.push(m[1]);
-  if (!urls.length) throw new Error('actions.js 里一个网址都没有，是不是被删了');
-  const a = shell.indexOf('URL_WHITELIST');
-  const wl = shell.slice(a, shell.indexOf('];', a));
-  for (const u of urls) {
-    let hit = false, w;
-    const okd = /['"](https:[^'"]+)['"]/g;
-    while ((w = okd.exec(wl))) if (u.indexOf(w[1]) === 0) hit = true;
-    if (!hit) throw new Error('这个网址点了会被静默拒绝：' + u);
-  }
+  //    原来设置页有个「直接打开」，点了去 mineru 申请 token 的页面，
+  //    主进程那边卡着域名白名单。删掉的理由不是安全，是**保证不了**：
+  //    能不能弹出浏览器取决于用户机器上的默认程序关联、协议注册、
+  //    安全软件拦不拦 —— 一个「点了可能没反应」的按钮比没有更糟。
+  //
+  //    替代品是「复制地址」，复制到剪贴板让用户自己粘，百分百可控。
+  //
+  //    这条测试盯着整条链路别被人顺手加回来。真要加回来的话，
+  //    **必须连域名白名单一起加**：页面的 HTML 是字符串拼出来的，
+  //    有转义漏洞就是钓鱼入口 —— 用户看到是我们的软件弹的浏览器，
+  //    戒心最低。
+  //
+  //    只看代码不看注释：注释里写着「这里曾经有 openUrl」是好事，
+  //    那是留给后来人的说明。
+  const strip = (src) => src.split('\n')
+    .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+    .join('\n');
+
+  const acts = strip(R('app/renderer/actions.js'));
+  const pre = strip(R('app/preload.js'));
+  const shell = strip(R('app/main.js'));
+
+  if (acts.includes('openUrl')) throw new Error('actions.js 里又有 openUrl 了');
+  if (pre.includes('openUrl')) throw new Error('preload.js 又开了 openUrl 的桥');
+  if (shell.includes("'open-url'")) throw new Error('主进程又注册了 open-url');
+  if (shell.includes('openExternal')) throw new Error('主进程又能弹浏览器了');
 });
 
-ck('白名单里不该再留本地版才需要的网址', () => {
-  const shell = R('app/main.js');
-  const a = shell.indexOf('URL_WHITELIST');
-  const wl = shell.slice(a, shell.indexOf('];', a));
-  for (const bad of ['nvidia.com', 'nvidia.cn', 'nodejs.org', 'aka.ms']) {
-    if (wl.indexOf(bad) >= 0) throw new Error('白名单里还留着本地版的：' + bad);
-  }
+ck('复制地址还在（删掉「直接打开」之后它是唯一的出路）', () => {
+  const st = ready(sb);
+  const h = settings(st);
+  if (!h.includes('data-act="copyTokenUrl"')) throw new Error('复制入口也没了');
+  if (h.includes('data-act="openTokenPage"')) throw new Error('「直接打开」还在');
+  // 地址本身必须画在界面上 —— 复制按钮万一失灵，用户还能照着敲
+  if (!h.includes('mineru.net/apiManage/token')) throw new Error('界面上看不到地址');
 });
+
 
 console.log('');
 console.log('轮询不该白重绘（治「上下滑动会顿」）：');

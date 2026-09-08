@@ -34,14 +34,31 @@ def ensure(path):
     return path
 
 
+IS_WINDOWS = os.name == 'nt'
+
+
+def _exe_name(name):
+    """把「node」变成这台机器上该有的文件名。
+
+    Windows 要 `.exe`，macOS/Linux 不要。**只此一处判断** —— 散在各处
+    写 `if os.name == 'nt'` 早晚漏一个。
+    """
+    if not IS_WINDOWS:
+        return name[:-4] if name.lower().endswith('.exe') else name
+    return name if name.lower().endswith('.exe') else name + '.exe'
+
+
 def find_exe(name, subdirs=()):
     r"""找一个可执行文件。**发行版和开发环境用同一套查找顺序。**
 
     顺序（先找到先用）：
 
-      1. `<安装目录>/runtime/<name>.exe`            发行版直接打包的（node）
-      2. `<安装目录>/runtime/<子目录>/<name>.exe`    pandoc 走这条
-      3. 系统 PATH                                  最后的退路
+      1. `<安装目录>/runtime/<name>`            发行版直接打包的（node）
+      2. `<安装目录>/runtime/<子目录>/<name>`    pandoc 走这条
+      3. 系统 PATH                              最后的退路
+
+    Windows 上自动补 `.exe`，别的平台不补 —— macOS/Linux 的可执行文件
+    没有扩展名。
 
     🔴 **为什么要有这个函数**：`tomath._NODE` 和 `todocx.PANDOC` 各写各的
        路径的话，发行版要改两处，改漏一处就是「在我这儿好好的」。
@@ -50,7 +67,7 @@ def find_exe(name, subdirs=()):
     ⚠️ 老项目那份还有「`runtime/python/Scripts/`」和「`.venv/Scripts/`」
        两条候选，是为了找 `mineru.exe` —— 云端版不装 MinerU，删掉。
     """
-    exe = name if name.lower().endswith('.exe') else name + '.exe'
+    exe = _exe_name(name)
     cand = [os.path.join(RUNTIME, exe)]
     for d in subdirs:
         cand.append(os.path.join(RUNTIME, d, exe))

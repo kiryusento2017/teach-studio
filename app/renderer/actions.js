@@ -318,10 +318,6 @@
       render();
     },
 
-    openTokenPage: function () {
-      window.api.openUrl(TOKEN_URL);
-    },
-
     // ── 转换 ─────────────────────────────────────────────────────────
     start: function () {
       if (st.starting || window.P2W_ISRUNNING(st)) return;

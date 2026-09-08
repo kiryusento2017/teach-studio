@@ -8,7 +8,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -31,10 +31,17 @@ const SERVER = path.join(ROOT, 'server', 'main.py');
 //    .venv **不能打包分发** —— 它的 Lib 下只有 site-packages，没有 stdlib，
 //    os.__file__ 指向开发机的 Python 安装目录，换台机器第一句 import 就死。
 //    跟 Python 那边的 paths.find_exe 是同一套思路，别再各写各的。
+//    macOS/Linux 上目录结构不一样：可执行文件没有 .exe，虚拟环境里是
+//    bin/ 不是 Scripts/。四条候选一起列，存在哪条用哪条。
 const PYTHON = (() => {
+  const win = process.platform === 'win32';
+  const exe = win ? 'python.exe' : 'python3';
+  const venvBin = win ? 'Scripts' : 'bin';
   const cands = [
-    path.join(ROOT, 'runtime', 'python', 'python.exe'),   // 发行版
-    path.join(ROOT, '.venv', 'Scripts', 'python.exe'),    // 开发环境
+    path.join(ROOT, 'runtime', 'python', exe),            // 发行版
+    path.join(ROOT, 'runtime', 'python', 'bin', exe),     // 发行版（类 Unix 布局）
+    path.join(ROOT, '.venv', venvBin, exe),               // 开发环境
+    path.join(ROOT, '.venv', venvBin, 'python'),          // 开发环境（兜底）
   ];
   const fs = require('fs');
   for (const p of cands) {
@@ -94,12 +101,34 @@ function startServer() {
 //    %APPDATA%\\pdf2word 放 4.6 MB（GPU 缓存、字典、Code Cache…），
 //    是最后一处还落在外面的东西。
 //    **必须在 app ready 之前设**，ready 之后再设就来不及了。
+//
+//    🔴 四个路径都要设，不能只设 userData：
+//
+//      userData     主目录（Windows: %APPDATA%\\<app>；macOS: ~/Library/Application Support/<app>）
+//      sessionData  Cookies / 缓存 / GPU 缓存
+//      logs         **macOS 上默认在 ~/Library/Logs/<app>**，不在 userData 底下 ——
+//                   只设 userData 的话它照样往外面写
+//      crashDumps   崩溃转储，通常跟着 userData 走，显式设一遍不吃亏
+//
+//    ⚠️ macOS 上还有两处是 Cocoa 自己的行为，setPath 管不着：
+//      ~/Library/Saved Application State/<bundle-id>.savedState  窗口恢复
+//      ~/Library/Preferences/<bundle-id>.plist                   系统偏好
+//    这两样得靠 Info.plist 里关掉窗口恢复才能免掉，真机验过再说。
 function relocateUserData() {
   const dir = path.join(ROOT, 'appdata');
   try {
     require('fs').mkdirSync(dir, { recursive: true });
     app.setPath('userData', dir);
     app.setPath('sessionData', dir);
+    // 这两个单独 try —— 有的 Electron 版本要求目录已存在，
+    // 设失败不该把前面两个也带倒。
+    for (const k of ['logs', 'crashDumps']) {
+      try {
+        const sub = path.join(dir, k);
+        require('fs').mkdirSync(sub, { recursive: true });
+        app.setPath(k, sub);
+      } catch (e2) { /* 单个设不上就算了，主目录已经挪进来了 */ }
+    }
   } catch (e) {
     // 目录建不出来（比如装进了 Program Files）就维持默认位置 ——
     // 这种情况下后端的 writable 自检会拦住用户并说明原因，
@@ -154,8 +183,43 @@ function createWindow() {
     },
   });
   win.setMenuBarVisibility(false);
+  attachContextMenu(win);
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
+
+// 🔴 **Electron 不带右键菜单，得自己挂。**
+//
+//    作者 2026-09-08 实测报的：填 token 的时候右击没有「粘贴」。
+//    token 是一长串随机字符，**从网站复制过来粘贴是唯一合理的输入方式**
+//    —— 让人手敲 50 个字符是不可能的。
+//
+//    顺带说明：`setMenuBarVisibility(false)` 只是把菜单栏藏起来，
+//    没有 `setApplicationMenu(null)`，所以 Ctrl+V / Ctrl+C 这些
+//    快捷键一直是能用的。缺的只是右键这条路 —— 而很多人就习惯右键。
+//
+//    菜单项按 `params.editFlags` 灰掉不可用的：在空输入框上右击，
+//    「剪切」「复制」是灰的，「粘贴」是亮的。比全都亮着、点了没反应强。
+function attachContextMenu(w) {
+  w.webContents.on('context-menu', (_e, params) => {
+    const items = [];
+    if (params.isEditable) {
+      const ef = params.editFlags || {};
+      items.push(
+        { label: '剪切', role: 'cut', enabled: !!ef.canCut },
+        { label: '复制', role: 'copy', enabled: !!ef.canCopy },
+        { label: '粘贴', role: 'paste', enabled: !!ef.canPaste },
+        { type: 'separator' },
+        { label: '全选', role: 'selectAll', enabled: !!ef.canSelectAll },
+      );
+    } else if (params.selectionText && params.selectionText.trim()) {
+      // 不是输入框、但选中了文字（比如报告里的一段）—— 只给「复制」
+      items.push({ label: '复制', role: 'copy' });
+    }
+    if (!items.length) return;      // 空白处右击：什么都不弹，别给个空菜单
+    Menu.buildFromTemplate(items).popup({ window: w });
+  });
+}
+
 
 app.whenReady().then(async () => {
   try {
@@ -247,8 +311,9 @@ ipcMain.handle('open-path', async (_e, p) => {
 // 而页面的 HTML 是字符串拼出来的，万一哪天有个转义漏洞，
 // 「能打开任意文件」立刻升级成「能执行任意程序」。
 //
-// 隔壁 open-url 早就卡了域名白名单，理由写在下面那段注释里；
-// 这一条的危害更大，却一直什么都没卡（2026-09-05 复查发现）。
+// （旁边原来还有个 open-url 也卡着域名白名单，2026-09-08 整条删了，
+//   理由见 preload.js 里那段说明。这一条的危害更大，
+//   却一直什么都没卡 —— 2026-09-05 复查才发现。）
 //
 // 限制成 .docx 不损失任何功能：渲染层只在两个地方用它，传的都是
 // 转换产物 —— 正品 r.docx 和判失败改名的次品 r.degraded
@@ -259,19 +324,6 @@ ipcMain.handle('open-file', async (_e, p) => {
   await shell.openPath(p);
   return true;
 });
-
-// 只放行这几个域名。页面的 HTML 是字符串拼出来的，万一哪天有个转义
-// 漏洞，「能打开任意 URL」就成了钓鱼入口 —— 用户看到是我们的软件
-// 弹出的浏览器，戒心是最低的。宁可写死几条也不开通用能力。
-// 🔴 **云端版的白名单跟本地版完全不同。** 从 pdf_to_word 搬过来时里面
-//    全是 NVIDIA 驱动、VC 运行库、Node.js —— 那些是本地版的门槛，这边
-//    一个都用不上；而真正要开的 mineru.net **反倒不在里面**，结果
-//    「去哪申请？」那个按钮点了会被静默拒绝。
-//    2026-09-08 建项目当天逐条核对外壳时抓出来的。
-const URL_WHITELIST = [
-  // 申请 API token 的地方 —— 没有它「去哪申请？」就是个死按钮
-  'https://mineru.net/',
-];
 
 // 更新装好之后重启。relaunch 排一个新实例，quit 关掉当前这个 ——
 // window-all-closed 里会顺手 kill 掉 Python 后端，新实例会重新起一个。
@@ -292,9 +344,11 @@ ipcMain.handle('restart-app', () => {
   return true;
 });
 
-ipcMain.handle('open-url', async (_e, u) => {
-  if (typeof u !== 'string') return false;
-  if (!URL_WHITELIST.some((prefix) => u.startsWith(prefix))) return false;
-  await shell.openExternal(u);
-  return true;
-});
+// 🔴 **这个软件不弹浏览器。**
+//
+//    这里曾经有 `open-url`（配一份域名白名单）。2026-09-08 作者定了删：
+//    能不能弹出浏览器取决于用户机器上的默认程序关联、协议注册、安全
+//    软件拦不拦 —— 保证不了的事就不做，改成「复制地址」让用户自己粘。
+//
+//    所以 `shell.openExternal` 在这个项目里**一次都不该出现**，
+//    tests/front_check.js 有一条测试盯着这句话。

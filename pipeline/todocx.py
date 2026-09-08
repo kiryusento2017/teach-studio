@@ -34,9 +34,13 @@ from lxml import etree
 
 import tomath
 
+import paths
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-PANDOC = os.path.join(ROOT, 'runtime', 'pandoc', 'pandoc.exe')
+# 🔴 文件名按平台走：Windows 是 pandoc.exe，macOS/Linux 就叫 pandoc。
+#    判断收在 paths._exe_name 里，别在这儿再写一遍 os.name == 'nt'。
+PANDOC = os.path.join(ROOT, 'runtime', 'pandoc', paths._exe_name('pandoc'))
 
 _M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'

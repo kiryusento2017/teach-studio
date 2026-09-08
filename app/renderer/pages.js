@@ -296,8 +296,7 @@
       + (tk.max_slots || 10) + ' 个</span></div>'
       + list.map(function (x, i) { return slotRow(x, i, st); }).join('')
       + '<div class="it"><span class="grow f-dim">注册指南</span>'
-      + link('copyTokenUrl', st.copied ? '已复制' : '复制地址')
-      + link('openTokenPage', '直接打开') + '</div>'
+      + link('copyTokenUrl', st.copied ? '已复制' : '复制地址') + '</div>'
       + '<div class="log" data-keep-scroll="guide"><span class="l">'
       + esc(guideText(n)).split(chr10()).join('</span><span class="l">')
       + '</span></div>'
