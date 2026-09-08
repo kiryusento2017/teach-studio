@@ -59,7 +59,10 @@ ROOT = os.path.dirname(HERE)
 DIST = os.path.join(ROOT, 'dist')
 
 # 产物目录用英文。中文路径要经过 Electron → Python 子进程 → pandoc 好几手。
-OUT = os.path.join(DIST, 'PDF2Word')
+# 目录、安装包、更新包一律叫 teach-studio（作者 2026-09-09 定）——
+# 这软件是「教学工作台」，PDF 转 Word 只是它第一个功能，产物名不该钉死
+# 在单个功能上。双击的那个 exe 保留中文名，那是给人看的。
+OUT = os.path.join(DIST, 'teach-studio')
 
 REPO_NAME = 'teach-studio'
 
@@ -90,7 +93,13 @@ CODE = [
 
 # 更新包里放什么。**刻意不含 runtime/** —— 那些不会变，加进来包就从
 # 1 MB 变成 700 MB。
+# 🔴 **runtime/xsl 是唯一进更新包的 runtime 内容**（190 KB，可忽略）。
+#    本地版 2026-09-09 才想明白这条：放在 runtime/ 下的修复，老用户点
+#    「检查更新」拿不到 —— 那次改动对他们等于没做。XSL 哪天换成开源实现，
+#    不带它老用户永远换不掉。python/pandoc/node 加进来会让包从 0.5 MB
+#    涨到几百 MB，那条原则仍然成立。
 UPDATE_PARTS = [
+    ('runtime/xsl', 'runtime/xsl'),
     ('pipeline', 'pipeline'),
     ('server', 'server'),
     ('app/main.js', 'resources/app/main.js'),
@@ -261,7 +270,7 @@ def put_readme(out, version):
         '\r\n'
         '=== 放哪儿（重要）===\r\n'
         '\r\n'
-        '把整个文件夹解压到 D 盘之类的地方，比如 D:\\软件\\PDF2Word。\r\n'
+        '把整个文件夹解压到 D 盘之类的地方，比如 D:\\软件\\teach-studio。\r\n'
         '\r\n'
         '⚠ 不要放进 C:\\Program Files —— 那个位置写不了文件。软件要往自己\r\n'
         '  文件夹里存 token、转换历史和临时文件，放进去会打不开。\r\n'
@@ -399,10 +408,123 @@ def make_full_zip(version):
     out = os.path.join(DIST, '%s-%s-full.zip' % (REPO_NAME, version))
     rm(out)
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
-        _zip_dir(OUT, zf, base='PDF2Word')
+        _zip_dir(OUT, zf, base='teach-studio')
     say('完整包：%s（%.0f MB）'
         % (os.path.basename(out), os.path.getsize(out) / 1024.0 / 1024))
     return out
+
+
+# ── 自解压安装包 ───────────────────────────────────────────────────────
+#
+# 做 exe 安装包用 7-Zip 的 SFX 模块，整套照本地版 pdf_to_word 搬过来，
+# 连它踩过的坑一起。
+
+_7Z_CANDS = [
+    r'C:\Program Files\7-Zip\7z.exe',
+    r'C:\Program Files (x86)\7-Zip\7z.exe',
+]
+
+
+def find_7z():
+    for p in _7Z_CANDS:
+        if os.path.isfile(p):
+            return p
+    return shutil.which('7z') or ''
+
+
+def make_sfx(version):
+    r"""把发行版做成自解压 exe：双击 → 弹框问放哪 → 解压完成 → 打开文件夹。
+
+    用 `7z.sfx`（带界面那个），**不是 `7zCon.sfx`**（控制台版，双击会弹
+    黑框）。拼法是：sfx 模块 + 配置 + .7z 数据，三个文件按顺序拼成一个 exe。
+
+    压缩用 `-mx=5`：`-mx=9` 对这堆东西（大量已压缩的 dll 和 wheel）只多省
+    几十 MB，却要多花好几倍时间。
+    """
+    sz = find_7z()
+    if not sz:
+        raise SystemExit('找不到 7z.exe。装一个：winget install 7zip.7zip')
+    sfx = os.path.join(os.path.dirname(sz), '7z.sfx')
+    if not os.path.isfile(sfx):
+        raise SystemExit('找不到 7z.sfx（7-Zip 的自解压模块）')
+
+    archive = os.path.join(DIST, '_payload.7z')
+    rm(archive)
+
+    # 🔴 排除**运行时**产生的东西。组装完通常会在 dist/teach-studio 里真跑一次
+    #    （那是验证发行版的必要动作），于是留下一堆本机痕迹：
+    #
+    #      appdata/     Electron 的 GPU 缓存、Code Cache
+    #      _tmp/        转换中转、**还有内容指纹缓存**（别人的产物）
+    #      logs/        🔴 里面有 token.json —— 打进包就是把凭据发出去
+    #      __pycache__  里面嵌着开发机的源码路径
+    #
+    #    🔴 `-x!` 不递归，`-xr!` 递归 —— 这一个字母的差别在本地版毁掉过
+    #       一整版：v0.0.3 用 `-xr!models` 想排掉根目录那个模型目录，
+    #       结果把**所有**叫 models 的目录都剔了（37 个），
+    #       pip/_internal/models 一没，用户点安装直接 ModuleNotFoundError。
+    #
+    #       前四个都是只在根目录出现的名字，用 `-x!` 就够；
+    #       后两个必须递归 —— __pycache__ 和 .pyc 本来就散在各处。
+    exclude = ['-x!_tmp', '-x!appdata', '-x!logs',
+               '-xr!__pycache__', '-xr!*.pyc']
+    say('压缩中（要几分钟）…')
+    r = subprocess.run([sz, 'a', '-t7z', '-mx=5', '-mmt=on'] + exclude
+                       + [archive, os.path.join(OUT, '*')],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if r.returncode != 0:
+        raise SystemExit('压缩失败：%s'
+                         % r.stdout.decode('utf-8', 'replace')[-400:])
+    say('压缩完 %.0f MB' % (os.path.getsize(archive) / 1024.0 ** 2))
+
+    # SFX 配置。
+    #
+    # 🔴 **官方 7z.sfx 只认这几个字段**：Title / BeginPrompt / Progress /
+    #    RunProgram / Directory / ExecuteFile / ExecuteParameters。
+    #
+    #    本地版原来还写着 InstallPath、GUIMode、OverwriteMode 等六个，
+    #    **官方模块一个都不认，全部静默忽略** —— 那是第三方修改版
+    #    7zSD.sfx 的扩展。后果：InstallPath 从 v0.0.1 起就没生效过，
+    #    六个安装包的默认路径一直是**安装包自己所在的目录**。
+    #    从浏览器下载后双击，默认填的就是「下载」文件夹 —— 那种目录
+    #    很多人定期清理，一清就把整个软件删了。
+    #
+    #    配置里留着不生效的字段比不写更糟：它让人以为设过默认路径了。
+    #    所以只写认得的那几个，把这件事直接在 BeginPrompt 里讲给用户。
+    cfg = (
+        ';!@Install@!UTF-8!\n'
+        'Title="PDF 转 Word · 云端版 __VER__"\n'
+        'BeginPrompt="要把「PDF 转 Word」装到哪里？\\n\\n'
+        '⚠ 下面默认填的是「这个安装包所在的文件夹」。如果你是从浏览器'
+        '下载的，那就是「下载」文件夹 —— 请改掉，否则哪天清理下载'
+        '文件夹会把整个软件一起删了。\\n\\n'
+        '建议填：D:\\\\teach-studio\\n\\n'
+        '⚠ 不要选 C:\\\\Program Files —— 那个位置写不了文件，'
+        '软件要往自己文件夹里存 token 和转换历史。\\n'
+        '路径里可以有中文、空格和括号，都验过。\\n\\n'
+        '装完双击里面的「PDF转Word.exe」就能用。不用装 Office，'
+        '不用装 Python，不用独立显卡。\\n'
+        '所有东西都留在这个文件夹里，不想用了直接删掉即可。"\n'
+        'RunProgram="explorer.exe ."\n'
+        ';!@InstallEnd@!\n'
+    ).replace('__VER__', version)
+    cfg_path = os.path.join(DIST, '_sfx_config.txt')
+    io.open(cfg_path, 'w', encoding='utf-8').write(cfg)
+
+    # 🔴 文件名用**英文**：GitHub 会把 Release 附件名里的中文吃掉
+    #    （PDF转Word-v0.0.1.exe 传上去会显示成 PDF.Word-v0.0.1.exe）。
+    exe = os.path.join(DIST, 'teach-studio-Setup-%s.exe' % version)
+    rm(exe)
+    say('拼装 exe…')
+    with io.open(exe, 'wb') as out:
+        for part in (sfx, cfg_path, archive):
+            with io.open(part, 'rb') as fh:
+                shutil.copyfileobj(fh, out, 1024 * 1024)
+    rm(archive)
+    rm(cfg_path)
+    say('安装包：%s（%.0f MB）'
+        % (os.path.basename(exe), os.path.getsize(exe) / 1024.0 ** 2))
+    return exe
 
 
 def sha256(p):
@@ -421,6 +543,9 @@ def main():
     ap.add_argument('--version', required=True, help='例如 v0.0.1')
     ap.add_argument('--update-only', action='store_true',
                     help='只打更新包，不组装完整发行版（快，几秒）')
+    ap.add_argument('--sfx', action='store_true',
+                    help='把已组装好的 dist/teach-studio 做成自解压 exe，'
+                         '不重新组装（组装过一次之后用这个，省几分钟）')
     a = ap.parse_args()
 
     if os.name != 'nt':
@@ -438,7 +563,14 @@ def main():
     say('依赖清单：%s' % ', '.join('%s %s' % kv for kv in req.items()))
 
     full = None
-    if not a.update_only:
+    setup = None
+
+    if a.sfx:
+        # 只做 exe，不重新组装 —— 前提是 dist/teach-studio 已经在了
+        if not os.path.isdir(OUT):
+            raise SystemExit('没有 %s，先跑一次不带 --sfx 的完整打包' % OUT)
+        setup = make_sfx(ver)
+    elif not a.update_only:
         print(flush=True)
         say('组装完整发行版（几百 MB，要几分钟）…')
         rm(OUT)
@@ -454,11 +586,12 @@ def main():
                      os.path.join(OUT, VERSION_NAME))
         shutil.copy2(req_path, os.path.join(OUT, REQUIRES_NAME))
         full = make_full_zip(ver)
+        setup = make_sfx(ver)
 
     print(flush=True)
     print('=' * 56, flush=True)
     print('产物在 dist/：', flush=True)
-    for p in [up, req_path] + ([full] if full else []):
+    for p in [up, req_path] + [x for x in (full, setup) if x]:
         print('  %-44s %8.2f MB  sha256=%s'
               % (os.path.basename(p), os.path.getsize(p) / 1024.0 / 1024,
                  sha256(p)[:16]), flush=True)
