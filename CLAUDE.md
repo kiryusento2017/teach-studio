@@ -12,7 +12,7 @@ PDF 转 Word 的**云端版**：识别走 MinerU 的云端 API，出 Word 的管
 # 1. 看项目在说什么
 type README.md
 
-# 2. 跑测试（应该全绿：后端 84 条、前端 43 条）
+# 2. 跑测试（应该全绿：后端 115 条、前端 85 条）
 .venv\Scripts\python.exe -m unittest discover -s tests -q
 node tests\front_check.js
 
@@ -79,16 +79,36 @@ app/                     Electron 外壳 + 无框架前端（全局 state + 整�
 
 ## 待办 / 悬而未决
 
-见 `_scratch\token_multi_progress.md` 末尾。截至 2026-09-08 主要是：
+进度档在 `_scratch\` 下：`token_multi_progress.md`（多 token / 双队列那一轮）、
+`ui_parity_progress.md`（2026-09-09 跟本地版对齐那一轮）。截至 2026-09-09：
 
-1. **打包脚本还没写** —— 检查更新已经能用了，但它依赖 `version.json`
-   （打包时写进去，记下这个包是哪个 Release）和 Release 里的
-   `requires.json`（依赖清单）。这两样都得由打包脚本产出，现在还没有。
-   在那之前 `local_version()` 一直返回 `(未知)`。
+1. **一次都没真机验证过对齐那一轮的界面。** 2026-09-09 改了 9 个屏
+   （关于页、连不上后台屏、拦截屏、日志屏、更新整屏、待转清单、底栏、
+   报告页、历史页），全部只过了测试，没开窗看。
 2. **单次页数上限存疑** —— 代码 `MAX_PAGES=600`，官方文档写 200。没确认，没动。
 3. **每日额度存疑** —— 文档写 1000 页且是「超了降优先级」，不是硬停。
 4. **WPS 能不能双击编辑 OMML 公式** —— 三个用户都用 WPS，这条没实测过。
    `_scratch\cloud_out.docx` 打开就能验。
-5. **还没打包过** —— `tools/` 是空的，没有 requirements.txt。
-   打包时**必须带上 `runtime/` 整个目录**：漏了 `pandoc.exe` 一份都转不出来，
-   漏了 `xsl/MML2OMML.XSL` 能出 Word 但公式全不是原生的。
+5. **文件数没记账** —— `store.py` 只记页数（`DAILY_PAGES=1000`），MinerU 还
+   限每天 5000 个文件，那个数一个字都没记。实际碰不到，但账是不全的。
+6. **每日用量按本机日期归零** —— `_today()` 用的是 `time.strftime('%Y-%m-%d')`，
+   而 MinerU 按哪个时区重置查不到。跨零点那几小时账面可能偏乐观，
+   真到顶了以服务端 `-60018` 为准。
+7. **PyMuPDF 是 AGPL-3.0**，本项目声明 GPL-3.0-or-later。相不相容不是代码
+   问题，得找懂的人看。见 `docs/UI_PARITY_DECISIONS.md` 的挂起清单。
+
+## 界面一致性
+
+跟本地版 `pdf_to_word` 的对照结论全在 `docs/UI_PARITY_DECISIONS.md`。
+**改界面前先翻一眼**：记了「不改」的别再改回去，那是决定不是遗漏 ——
+尤其 F 类那五条（httpGet 判 r.ok、404 停轮询、errBar 可关、按钮没接上会
+报错、每行移除），云端做得比本地版对，照本地版改等于把 bug 抄回来。
+
+## 发版
+
+`docs/RELEASE.md` 是发版规矩，**每次从头照着走一遍**。三条最容易栽的：
+打包前工作区必须干净（`version.json` 记的是 HEAD 的 sha，脏工作区等于那个
+sha 在说谎）、手动改 `app/package.json` 的 `version`（打包脚本不碰它，
+且不带 `v` 前缀）、转正是**两条**命令（`--prerelease=false` 之后还要
+`--latest`，漏了会让所有用户的「检查更新」静默失灵，而 Release 页面上
+看着一切正常）。
