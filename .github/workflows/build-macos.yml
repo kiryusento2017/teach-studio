@@ -135,8 +135,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: teach-studio-mac-${{ matrix.arch }}
-          path: |
-            dist-mac/*.dmg
-            dist-mac/*.zip
+          path: dist-mac/*.dmg
           if-no-files-found: error
           retention-days: 30

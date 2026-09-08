@@ -48,8 +48,7 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
-        { "target": "dmg" },
-        { "target": "zip" }
+        { "target": "dmg" }
       ],
       "identity": null,
       "artifactName": "teach-studio-${version}-mac-${arch}.${ext}"
