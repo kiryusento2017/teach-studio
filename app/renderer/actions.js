@@ -91,6 +91,38 @@
   //    这里只是把「每秒撞你一次」变成「整个转换过程撞三五次」。
   var lastSig = '';
 
+  // 🔴 **签名要把「每秒都在变、但界面上根本不显示」的字段剔掉。**
+  //
+  //    2026-09-08 实测栽在这儿：后端 poll 每秒返回一个 `elapsed`
+  //    （已用时），而这个界面从头到尾没显示过它 —— 于是
+  //    `JSON.stringify(d)` 每秒都不同，上面那道「数据没变就不重绘」
+  //    **从来没生效过**，每秒照样整页 innerHTML 重来。任务一多、
+  //    列表一长就卡，作者真机报的。
+  //
+  //    最讽刺的是上面那段注释里就写着「本地版没法用这一招，因为它
+  //    每秒回来的 elapsed 必然在变」—— 写下了原则，实现却正好相反，
+  //    而且写下之后没有人再核对过。
+  //
+  //    **反向排除，不是正着列举。** 只把「确定每秒在变、且界面不用」
+  //    的字段挑出去，其余一律进签名：
+  //      · 正着列举漏一个 → 界面该变没变（bug）
+  //      · 反着排除漏一个 → 多重绘一次（性能）
+  //    错的方向必须朝安全那一侧。
+  //
+  //    往这里加字段之前先问一句：**界面上真的不显示它吗？**
+  var SIG_SKIP = { elapsed: 1 };
+
+  function convSig(d) {
+    if (!d || typeof d !== 'object') return String(d);
+    var o = {};
+    for (var k in d) {
+      if (Object.prototype.hasOwnProperty.call(d, k) && !SIG_SKIP[k]) {
+        o[k] = d[k];
+      }
+    }
+    return JSON.stringify(o);
+  }
+
   function stopPolling() {
     if (poller) { clearInterval(poller); poller = null; }
     lastSig = '';
@@ -112,7 +144,7 @@
       // 跟上一轮一模一样就别动 DOM —— 见上面 lastSig 那段。
       // 终态（done / cancelled）走的是上面那条路，一定会重绘，
       // 不会被这道判断挡住。
-      var sig = JSON.stringify(d);
+      var sig = convSig(d);
       if (sig === lastSig) return;
       lastSig = sig;
       render();

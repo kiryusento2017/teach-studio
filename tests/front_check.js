@@ -614,14 +614,42 @@ ck('actions 暴露了 poll 供测试驱动', () => {
   }
 });
 
+// 🔴 下面这条原来三轮的 elapsed 都写死 5 —— 而真实的 poll 每秒 +1。
+//    构造得不真实，于是「数据没变就不重绘」从来没生效过，
+//    这条测试却一直绿着（2026-09-08 作者真机报「任务一多滑动就卡」
+//    才查出来）。现在按真实情况构造。
+function pollRow(sec, extra) {
+  return Object.assign({ state: 'running', current: 0, total: 2,
+                         now: 'a.pdf', error: '', elapsed: sec,
+                         lines: ['云端状态：running'], queued: [],
+                         results: [] }, extra || {});
+}
+
+ck('只有已用时在变也不重绘（界面根本不显示它）', async () => {
+  const t = mkPollSandbox([pollRow(5), pollRow(6), pollRow(7)]);
+  await t.poll(); await t.poll(); await t.poll();
+  if (t.count() !== 1) {
+    throw new Error('只有 elapsed 在变却重绘了 ' + t.count() + ' 次（该 1 次）');
+  }
+});
+
 ck('连续三轮数据一样，只重绘一次', async () => {
-  const same = { state: 'running', current: 0, total: 2, now: 'a.pdf',
-                 error: '', elapsed: 5, lines: ['云端状态：running'],
-                 results: [] };
+  const same = pollRow(5);
   const t = mkPollSandbox([same, same, same]);
   await t.poll(); await t.poll(); await t.poll();
   if (t.count() !== 1) {
     throw new Error('数据没变却重绘了 ' + t.count() + ' 次（该 1 次）');
+  }
+});
+
+ck('排除表必须是反向排除，不能改成正向白名单', () => {
+  // 🔴 护栏。正着列举「哪些字段进签名」的话，漏一个就是「界面该变
+  //    没变」——那是 bug，比多重绘一次严重得多。这条盯着实现方向。
+  const src = R('app/renderer/actions.js')
+    .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  if (!src.includes('SIG_SKIP')) throw new Error('排除表没了');
+  if (!/for \(var k in d\)/.test(src)) {
+    throw new Error('不再是「遍历全部、剔掉少数」的形状了');
   }
 });
 
