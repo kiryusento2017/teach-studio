@@ -12,3 +12,7 @@ __pycache__/
 # pandoc.exe 有 222 MB —— GitHub 单文件上限 100 MB，进了历史就永远 push 不上去。
 # 它是运行时不是业务代码，更新也从不动它（分层策略见本地版 update.py）。
 runtime/pandoc/pandoc.exe
+
+# 打包时生成的，记「这个包是哪个 Release」。开发环境里它只是残留，
+# 不该进版本库 —— 谁 clone 下来都会带着一个别人的版本号。
+version.json
