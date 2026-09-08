@@ -211,18 +211,24 @@ class ConvertReq(BaseModel):
     out_dir: str = ''
 
 
-def _work(task_id, out_dir):
+def _work(task_id, pdf_paths, out_dir):
     r"""后台线程：逐份转。一份失败不影响其余。
 
-    **待转清单在任务表里**（`_TASKS[id]['paths']`），不是参数 —— 因为
-    转换进行中用户还能往后面加（见 `/api/convert/{id}/append`）。
+    **一批就是一批，中途不变。** 转换中用户还能继续拖文件进来，但那些
+    只在前端的「待办」里排着，这一批转完前端会把它们晋升成新一批、起一个
+    新任务（本地版 pdf_to_word 同一套做法）。
+
+    这么切的好处不只是后端简单：界面上「哪些是这批、哪些是下批」天然
+    分得清。以前让队列在转换中动态增长，前端就得把「已完成 / 正在转 /
+    排队中 / 刚拖进来」四段拼在一张列表里 —— 那正是
+    「4 个文件下面又冒出一模一样 4 个」那个 bug 的土壤。
 
     🔴 **整体套一层兜底。** 这是后台线程，异常会被 Python 悄悄吞掉，
     任务就永远停在 running —— 界面转圈转到天荒地老，用户只会以为软件慢。
     （老项目实测撞见过：漏一个 import，四条测试全部等到超时才失败。）
     """
     try:
-        _work_inner(task_id, out_dir)
+        _work_inner(task_id, pdf_paths, out_dir)
     except Exception as e:
         with _LOCK:
             t = _TASKS.get(task_id)
@@ -231,7 +237,7 @@ def _work(task_id, out_dir):
                 t['error'] = '%s: %s' % (type(e).__name__, str(e)[:200])
 
 
-def _work_inner(task_id, out_dir):
+def _work_inner(task_id, pdf_paths, out_dir):
     work_root = paths.ensure(os.path.join(paths.TMP, 'cloud', task_id))
 
     def stopped():
@@ -239,29 +245,14 @@ def _work_inner(task_id, out_dir):
             t = _TASKS.get(task_id)
             return bool(t and t.get('cancel'))
 
-    i = 0
-    while True:
-        # 🔴 **「拿下一份」和「收工」必须在同一把锁里定下来。**
-        #
-        #    分开写就有这个缝：这边刚判完「没有下一份了」、还没来得及把
-        #    state 改成 done，用户那边正好 append 进来一份 —— append 看到
-        #    state 还是 running 就把文件塞进队列，然后这边收工退出。
-        #    结果：队列里躺着一份永远没人转的文件，界面显示「转完了」。
+    for i, pdf in enumerate(pdf_paths):
+        if stopped():
+            break
         with _LOCK:
             t = _TASKS.get(task_id)
             if t is None:
                 return
-            if t.get('cancel'):
-                t['state'] = 'cancelled'
-                t['current'] = len(t['paths'])
-                return
-            if i >= len(t['paths']):
-                t['state'] = 'done'
-                t['current'] = len(t['paths'])
-                return
-            pdf = t['paths'][i]
             t['current'] = i
-            t['total'] = len(t['paths'])
             t['now'] = os.path.basename(pdf)
             t['lines'] = []
 
@@ -291,7 +282,12 @@ def _work_inner(task_id, out_dir):
             if t is None:
                 return
             t['results'].append(rep)
-        i += 1
+
+    with _LOCK:
+        t = _TASKS.get(task_id)
+        if t is not None:
+            t['state'] = 'cancelled' if t.get('cancel') else 'done'
+            t['current'] = len(pdf_paths)
 
 
 @app.post('/api/convert')
@@ -317,45 +313,21 @@ def start_convert(req: ConvertReq):
         tid = '%d' % int(time.time() * 1000)
         _TASKS[tid] = {'state': 'running', 'started': time.time(),
                        'current': 0, 'total': len(pdfs), 'now': '',
-                       'paths': list(pdfs),
                        'results': [], 'lines': [], 'error': '', 'cancel': False}
 
-    threading.Thread(target=_work, args=(tid, req.out_dir or ''),
+    threading.Thread(target=_work, args=(tid, pdfs, req.out_dir or ''),
                      daemon=True).start()
     return {'ok': True, 'task_id': tid, 'total': len(pdfs)}
 
 
-@app.post('/api/convert/{task_id}/append')
-def append_convert(task_id: str, req: ConvertReq):
-    r"""往正在转的那一批后面追加文件（作者 2026-09-08 要的「双队列」）。
-
-    以前正转着就不让加，用户得干等一批转完。现在加进来的排在后面，
-    当前这份转完自动接上去。
-
-    🔴 **输出目录跟着原来那一批**，`req.out_dir` 不生效 —— 一批文件散落在
-       两个目录里，用户回头找不着。想换目录就等这批转完再开一批。
-    """
-    pdfs = [p for p in (req.paths or []) if p.lower().endswith('.pdf')]
-    if not pdfs:
-        return JSONResponse({'detail': '没有可转的 PDF'}, status_code=400)
-    with _LOCK:
-        t = _TASKS.get(task_id)
-        if t is None:
-            return JSONResponse({'detail': '没有这个任务'}, status_code=404)
-        if t.get('cancel'):
-            return JSONResponse({'detail': '这一批正在停，加不进去了'},
-                                status_code=409)
-        if t.get('state') != 'running':
-            return JSONResponse({'detail': '这一批已经转完了，直接开新的一批'},
-                                status_code=409)
-        # 队列里已经有的不重复加 —— 用户可能把同一批文件又拖了一次
-        have = set(t['paths'])
-        add = [p for p in pdfs if p not in have]
-        t['paths'].extend(add)
-        t['total'] = len(t['paths'])
-        return {'ok': True, 'added': len(add), 'skipped': len(pdfs) - len(add),
-                'total': t['total']}
-
+# 🔴 这里曾经有个 `POST /api/convert/{id}/append`，让转换进行中还能往
+#    后端队列里追加文件。2026-09-09 整条删了 —— 改用本地版的做法：
+#    待办只在前端排着，这一批转完前端自动晋升成新一批。
+#
+#    删它不是因为不好使，是因为「队列在转换中动态增长」逼着前端把
+#    「已完成 / 正在转 / 排队中 / 刚拖进来」四段拼进一张列表，
+#    而那正是「4 个文件下面又冒出一模一样 4 个」那个 bug 的土壤。
+#    一批就是一批，界面上才分得清这批和下批。
 
 @app.get('/api/convert/{task_id}')
 def poll(task_id: str):
@@ -369,16 +341,11 @@ def poll(task_id: str):
         t = _TASKS.get(task_id)
         if t is None:
             return JSONResponse({'detail': '没有这个任务'}, status_code=404)
-        # 还没轮到的那些（当前这份之后的），界面上要能看见排了几份
-        # `.get` 不是 `[...]` —— 测试里会手搓任务条目，少一个键不该让查进度崩
-        queued = [os.path.basename(p)
-                  for p in (t.get('paths') or [])[t['current'] + 1:]]
         return {
             'state': t['state'], 'current': t['current'], 'total': t['total'],
             'now': t['now'], 'error': t['error'],
             'elapsed': int(time.time() - t['started']),
             'lines': list(t['lines']),
-            'queued': queued,
             'results': [dict(r) for r in t['results']],
         }
 

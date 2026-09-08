@@ -1041,11 +1041,18 @@ class Test设置接口(unittest.TestCase):
 
 
 
-class Test双队列(unittest.TestCase):
-    r"""转换进行中还能往后面加文件（作者 2026-09-08 要的）。
+class Test转换批次(unittest.TestCase):
+    r"""**一批就是一批，中途不变。**
 
-    以前正转着就返回 409「等它转完」，用户得干等。现在加进来的排在后面，
-    当前这份转完自动接上。
+    2026-09-09 之前这里是「双队列」：转换中还能往后端队列里追加文件
+    （`POST /api/convert/{id}/append`），worker 用 while 循环读共享队列。
+    整套删了，改用本地版 pdf_to_word 的做法 —— 待办只在前端排着，
+    这一批转完前端自动晋升成新一批、起一个新任务。
+
+    删它不是因为不好使，是因为「队列在转换中动态增长」逼着前端把
+    「已完成 / 正在转 / 排队中 / 刚拖进来」四段拼进一张列表，而那正是
+    「4 个文件下面又冒出一模一样 4 个」那个 bug 的土壤。后端这边顺带
+    省掉了「取下一份和收工必须在同一把锁里」那种竞态。
     """
 
     def setUp(self):
@@ -1061,11 +1068,11 @@ class Test双队列(unittest.TestCase):
             if k.startswith('q'):
                 srv._TASKS.pop(k, None)
 
-    def _task(self, tid, paths):
+    def _task(self, tid, n):
         srv._TASKS[tid] = {'state': 'running', 'started': time.time(),
-                           'current': 0, 'total': len(paths), 'now': '',
-                           'paths': list(paths), 'results': [], 'lines': [],
-                           'error': '', 'cancel': False}
+                           'current': 0, 'total': n, 'now': '',
+                           'results': [], 'lines': [], 'error': '',
+                           'cancel': False}
 
     def _ok(self, pdf):
         return {'ok': True, 'error': '', 'cancelled': False, 'pdf': pdf,
@@ -1074,77 +1081,75 @@ class Test双队列(unittest.TestCase):
                 'math_engine': '', 'math_note': '', 'auto_dir': '',
                 'degraded': '', 'details_dropped': 0}
 
-    def test_转到一半加进来的也会被转掉(self):
-        r"""🔴 这条钉住的是那个竞态：worker 判完「没有下一份了」和把 state
-        改成 done 必须在同一把锁里。分开写的话，正好卡在中间 append 进来的
-        文件会永远躺在队列里没人转，而界面显示「转完了」。
-        """
-        self._task('q1', ['a.pdf'])
-
-        def fake(pdf, out_docx, work, toks, **kw):
-            self.done.append(pdf)
-            if pdf == 'a.pdf':      # 转第一份的时候，用户又拖进来一份
-                srv.append_convert('q1', srv.ConvertReq(paths=['b.pdf']))
-            return self._ok(pdf)
-
-        srv.convert.pdf_to_word = fake
-        srv._work_inner('q1', tempfile.mkdtemp())
+    def test_一批转完就收工(self):
+        self._task('q1', 2)
+        srv.convert.pdf_to_word = lambda pdf, *a, **k: (
+            self.done.append(pdf) or self._ok(pdf))
+        srv._work_inner('q1', ['a.pdf', 'b.pdf'], tempfile.mkdtemp())
         self.assertEqual(self.done, ['a.pdf', 'b.pdf'])
         self.assertEqual(srv._TASKS['q1']['state'], 'done')
-        self.assertEqual(srv._TASKS['q1']['total'], 2)
-
-    def test_加进来的排在后面不插队(self):
-        self._task('q2', ['a.pdf', 'b.pdf'])
-        srv.append_convert('q2', srv.ConvertReq(paths=['c.pdf']))
-        self.assertEqual(srv._TASKS['q2']['paths'], ['a.pdf', 'b.pdf', 'c.pdf'])
-
-    def test_同一份不重复加(self):
-        self._task('q3', ['a.pdf'])
-        r = srv.append_convert('q3', srv.ConvertReq(paths=['a.pdf', 'b.pdf']))
-        self.assertEqual(r['added'], 1)
-        self.assertEqual(r['skipped'], 1)
-        self.assertEqual(srv._TASKS['q3']['paths'], ['a.pdf', 'b.pdf'])
-
-    def test_转完的那批加不进去(self):
-        self._task('q4', ['a.pdf'])
-        srv._TASKS['q4']['state'] = 'done'
-        r = srv.append_convert('q4', srv.ConvertReq(paths=['b.pdf']))
-        self.assertEqual(r.status_code, 409)
-
-    def test_正在停的那批加不进去(self):
-        self._task('q5', ['a.pdf'])
-        srv._TASKS['q5']['cancel'] = True
-        r = srv.append_convert('q5', srv.ConvertReq(paths=['b.pdf']))
-        self.assertEqual(r.status_code, 409)
-
-    def test_不存在的任务给404(self):
-        r = srv.append_convert('q-nope', srv.ConvertReq(paths=['b.pdf']))
-        self.assertEqual(r.status_code, 404)
-
-    def test_没有pdf就直说(self):
-        self._task('q6', ['a.pdf'])
-        r = srv.append_convert('q6', srv.ConvertReq(paths=['x.txt']))
-        self.assertEqual(r.status_code, 400)
-
-    def test_查进度能看到排队的都有谁(self):
-        self._task('q7', ['a.pdf', 'b.pdf', 'c.pdf'])
-        d = client.get('/api/convert/q7').json()
-        self.assertEqual(d['queued'], ['b.pdf', 'c.pdf'])   # 当前那份不算
-        self.assertEqual(d['total'], 3)
+        self.assertEqual(srv._TASKS['q1']['current'], 2)
 
     def test_停了就不再往下转(self):
-        self._task('q8', ['a.pdf', 'b.pdf'])
+        self._task('q2', 2)
 
-        def fake(pdf, out_docx, work, toks, **kw):
+        def fake(pdf, *a, **k):
             self.done.append(pdf)
-            srv._TASKS['q8']['cancel'] = True     # 转完第一份就按停止
+            srv._TASKS['q2']['cancel'] = True     # 转完第一份就按停止
             return self._ok(pdf)
 
         srv.convert.pdf_to_word = fake
-        srv._work_inner('q8', tempfile.mkdtemp())
+        srv._work_inner('q2', ['a.pdf', 'b.pdf'], tempfile.mkdtemp())
         self.assertEqual(self.done, ['a.pdf'])
-        self.assertEqual(srv._TASKS['q8']['state'], 'cancelled')
+        self.assertEqual(srv._TASKS['q2']['state'], 'cancelled')
 
+    def test_一份失败不带倒整批(self):
+        self._task('q3', 3)
+
+        def fake(pdf, *a, **k):
+            self.done.append(pdf)
+            if pdf == 'b.pdf':
+                return {'ok': False, 'error': '云端解析失败', 'cancelled': False,
+                        'pdf': pdf, 'docx': '', 'pages': 0, 'scan_pages': [],
+                        'formulas': 0, 'formulas_xsl': 0, 'tables': 0,
+                        'images': 0, 'math_engine': '', 'math_note': '',
+                        'auto_dir': '', 'degraded': '', 'details_dropped': 0}
+            return self._ok(pdf)
+
+        srv.convert.pdf_to_word = fake
+        srv._work_inner('q3', ['a.pdf', 'b.pdf', 'c.pdf'], tempfile.mkdtemp())
+        self.assertEqual(self.done, ['a.pdf', 'b.pdf', 'c.pdf'])
+        self.assertEqual(srv._TASKS['q3']['state'], 'done')
+        oks = [r['ok'] for r in srv._TASKS['q3']['results']]
+        self.assertEqual(oks, [True, False, True])
+
+    def test_后台线程抛异常也不会永远卡在running(self):
+        r"""🔴 后台线程的异常会被 Python 悄悄吞掉，任务就永远停在 running，
+        界面转圈转到天荒地老。"""
+        self._task('q4', 1)
+
+        def boom(*a, **k):
+            raise RuntimeError('什么奇怪的错误')
+
+        srv.convert.pdf_to_word = boom
+        srv._work(('q4'), ['a.pdf'], tempfile.mkdtemp())
+        self.assertEqual(srv._TASKS['q4']['state'], 'done')
+        self.assertIn('RuntimeError', srv._TASKS['q4']['error'])
+
+    def test_没有追加接口了(self):
+        r"""🔴 待办只在前端排着，后端不知道它的存在。留一个没人调的接口
+        就是这项目一直在防的形状。"""
+        self.assertFalse(hasattr(srv, 'append_convert'))
+        r = client.post('/api/convert/whatever/append', json={'paths': ['a.pdf']})
+        self.assertEqual(r.status_code, 404)
+
+    def test_查进度不再返回排队清单(self):
+        r"""前端从自己的 items 画表，不需要后端告诉它谁在排队。"""
+        self._task('q5', 2)
+        d = client.get('/api/convert/q5').json()
+        self.assertNotIn('queued', d)
+        self.assertEqual(set(d) & {'state', 'current', 'total', 'results'},
+                         {'state', 'current', 'total', 'results'})
 
 class Test检查更新(unittest.TestCase):
     r"""整套逻辑在 pipeline/update.py（从本地版搬来的），这里只验接到 HTTP

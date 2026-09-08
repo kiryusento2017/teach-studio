@@ -145,6 +145,14 @@
           render();
         }).catch(function () { render(); });
         refreshEnv();
+        // 待办接上：转完自动起新一批；中途停了就并回待转清单。
+        if (d.state === 'done' && st.pending.length) {
+          promotePending();
+          return;
+        }
+        if (d.state === 'cancelled' && st.pending.length) {
+          mergePendingToItems();
+        }
         return;
       }
       // 跟上一轮一模一样就别动 DOM —— 见上面 lastSig 那段。
@@ -176,6 +184,8 @@
   }
 
   function addPaths(paths) {
+    // 正在转的时候拖进来的，走待办 —— 不打断这一批。
+    if (window.P2W_ISRUNNING(st) || st.task) { addPending(paths); return; }
     if (!paths || !paths.length) { render(); return; }
     st.scanning = true;
     st.err = '';
@@ -197,6 +207,86 @@
       st.err = String(e && e.message || e);
       render();
     });
+  }
+
+  // ── 待办 ─────────────────────────────────────────────────────────────
+  //
+  // 转换中拖进来的文件先进这儿，这一批转完自动晋升成新一批。
+  // 后端**不知道待办的存在** —— 一批就是一批，晋升时前端起一个新任务。
+
+  function addPending(paths) {
+    if (!paths || !paths.length) { render(); return; }
+    st.pendingBusy = true;
+    st.err = '';
+    render();
+    HTTP.post('/api/scan', { paths: paths }).then(function (d) {
+      // 🔴 **去重要比两样**：待办里已有的、**正在转的这批**。
+      //    用户很可能把已经在转的某份又拖一次，那份转出来会覆盖同一个
+      //    .docx，白花一次额度。
+      var seen = {};
+      st.pending.forEach(function (x) { seen[x.path] = true; });
+      st.items.forEach(function (x) { seen[x.path] = true; });
+      (d.items || []).forEach(function (x) {
+        // 体检不过的不进待办 —— 它在主队列里同样会当场失败，
+        // 提前挡掉比让用户等到晋升之后才看见一个红叉好。
+        if (x.ok && !seen[x.path]) { st.pending.push(x); seen[x.path] = true; }
+      });
+      st.pendingBusy = false;
+
+      // 🔴 **体检的这十几秒里，这一批可能已经转完了。**
+      //
+      //    扫一个文件夹要时间。等它回来时轮询可能早就拿到 done 了 ——
+      //    而那一刻 st.pending 还是空的，所以轮询走的是「没有待办」
+      //    那条路：停轮询、不晋升。之后再没有任何东西会碰这些文件：
+      //    既不转、也不显示（done 时待办整块不渲染）、连「移除」都点不到，
+      //    而且会一直躺着，等用户下次手动开一批转完时被突然拉起来 ——
+      //    那时他早忘了自己拖过什么。
+      //
+      //    所以体检回来必须自己补一次判断，不能指望轮询。
+      if (st.task && st.task.state === 'done' && st.pending.length) {
+        promotePending();
+        return;
+      }
+      if (st.task && st.task.state === 'cancelled' && st.pending.length) {
+        mergePendingToItems();
+      }
+      render();
+    }).catch(function (e) {
+      st.pendingBusy = false;
+      st.err = String(e && e.message || e);
+      render();
+    });
+  }
+
+  // 待办晋升成主队列。**这批转完的那一刻自动调，不问用户。**
+  //
+  // 复用 start() 起新任务，不另写一条发起转换的路 —— start() 里那几样
+  // 状态归位（showReport 之类）是「上一批的界面状态不许串到新一批」的
+  // 既有教训，另起一条等于把它们漏掉。
+  function promotePending() {
+    // 上一批的结果留一份，报告要靠它。放在改 items 之前 ——
+    // 下面那句一改，st.task 还在但列表已经是新一批的了。
+    st.lastResults = (st.task && st.task.results) || null;
+    st.showLastReport = false;
+    st.items = st.pending.slice();
+    st.picked = {};
+    st.items.forEach(function (x) { st.picked[x.path] = true; });
+    st.pending = [];
+    window.P2W_ACTS.start();
+  }
+
+  // 中途停了的话，待办并回待转清单**让用户自己决定** ——
+  // 他按了停止，不该反手又给他起一批。
+  function mergePendingToItems() {
+    var seen = {};
+    st.items.forEach(function (x) { seen[x.path] = true; });
+    st.pending.forEach(function (x) {
+      if (!seen[x.path]) {
+        st.items.push(x);
+        st.picked[x.path] = true;
+      }
+    });
+    st.pending = [];
   }
 
   window.P2W_ACTS = {
@@ -379,16 +469,15 @@
         st.taskId = d.task_id;
         st.task = { state: 'running', current: 0, total: d.total,
                     now: '', lines: [], results: [] };
-        // 🔴 **交出去的从待选清单里拿掉** —— 它们已经在队列里了。
-        //    不拿掉的话，转换中的列表下面会再原样列一遍同一批文件
-        //    （2026-09-08 作者报的：扔 4 个进去点开始，下面又冒出
-        //    一模一样的 4 个）。以前不显示待选清单所以看不出来，
-        //    加了「转换中也能继续加文件」之后就露出来了。
-        //    appendQueue 那边一直是这么做的，这里漏了。
-        var gone = {};
-        paths.forEach(function (p) { gone[p] = true; });
-        st.items = st.items.filter(function (x) { return !gone[x.path]; });
-        paths.forEach(function (p) { delete st.picked[p]; });
+        // 🔴 **不清 st.items。** 转换中的那张表就是从它画出来的 ——
+        //    结果按路径贴到对应行上，行的状态在变、表本身不变。
+        //
+        //    2026-09-08 这里曾经清过一次：当时的列表是「已完成 + 正在转 +
+        //    排队中 + 刚拖进来」四段拼接，不清就会把同一批文件在下面再
+        //    列一遍。那是打在症状上的补丁 —— 换成一张表之后，
+        //    根本不会有那种事，而清了反而没东西可画。
+        st.showReport = false;
+        st.showLastReport = false;
         render();
         startPolling();
       }).catch(function (e) {
@@ -398,35 +487,21 @@
       });
     },
 
-    // 正转着的时候把新选的文件加到队列后面（作者要的「双队列」）。
-    // 🔴 **输出目录跟着原来那一批**，后端不认这里传的 out_dir ——
-    //    一批文件散落两个目录，用户回头找不着。
-    appendQueue: function () {
-      if (!st.taskId || !window.P2W_ISRUNNING(st)) return;
-      var paths = st.items.filter(function (x) {
-        return x.ok && st.picked[x.path];
-      }).map(function (x) { return x.path; });
-      if (!paths.length) return;
-      st.starting = true;
-      st.err = '';
+    // 转换中的「再加几份」。选完直接进待办，不打断这一批。
+    pickMore: function () {
+      window.api.pickFiles().then(function (ps) {
+        if (ps && ps.length) addPending(ps);
+      });
+    },
+
+    delPending: function (p) {
+      st.pending = st.pending.filter(function (x) { return x.path !== p; });
       render();
-      HTTP.post('/api/convert/' + st.taskId + '/append', { paths: paths })
-        .then(function (d) {
-          st.starting = false;
-          // 加进队列的从待选清单里拿掉 —— 留着会让人以为没加上
-          var gone = {};
-          paths.forEach(function (p) { gone[p] = true; });
-          st.items = st.items.filter(function (x) { return !gone[x.path]; });
-          paths.forEach(function (p) { delete st.picked[p]; });
-          if (d && d.skipped) {
-            st.err = '有 ' + d.skipped + ' 份已经在队列里了，没重复加';
-          }
-          render();
-        }).catch(function (e) {
-          st.starting = false;
-          st.err = String(e && e.message || e);
-          render();
-        });
+    },
+
+    toggleLastReport: function () {
+      st.showLastReport = !st.showLastReport;
+      render();
     },
 
     stop: function () {
@@ -434,14 +509,21 @@
       HTTP.post('/api/convert/' + st.taskId + '/cancel', {}).catch(function () {});
     },
 
+    // 「再转一批」：回到空的待转清单。
+    //
+    // 🔴 上一批的结果**不留** —— 那张表已经看过了，它的 Word 也已经躺在
+    //    用户硬盘里。留着的话点完「再转一批」还看见一堆旧文件，
+    //    用户会以为没清干净。（lastResults 是给「待办晋升」那条路用的，
+    //    手动开新一批不走那儿。）
     newBatch: function () {
       st.task = null;
       st.taskId = '';
+      st.items = [];
+      st.picked = {};
       st.showReport = false;
+      st.showLastReport = false;
+      st.lastResults = null;
       st.err = '';
-      // 只把「这一批真转过的」取消勾选，没转过的留着
-      var ran = {};
-      ((st.task && st.task.results) || []).forEach(function (r) { ran[r.pdf] = true; });
       render();
     },
 

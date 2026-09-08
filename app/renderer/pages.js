@@ -330,17 +330,40 @@
   }
 
   // ── 转换中 / 转完的行 ────────────────────────────────────────────────
-  function resultRow(r) {
-    var ok = !!r.ok;
-    return '<div class="it" title="' + esc(ok ? r.docx : (r.error || '')) + '">'
-      + dot(ok ? C.ok : C.bad)
-      + '<span class="grow ell">' + esc(base(r.pdf)) + '</span>'
-      + '<span class="rt ell" style="max-width:300px">'
-      + esc(r.line || '') + '</span>'
-      + (ok
-          ? link('openFile', '打开', r.docx) + link('openFolder', '文件夹', r.docx)
-          : (r.degraded ? link('openFile', '打开次品', r.degraded) : ''))
-      + '</div>';
+  // 转完一份之后那一行。**成功和失败给的东西不一样**：
+  //
+  //   成功 → 打开 / 文件夹；秒回的标「缓存」；公式没转全的写进 title
+  //   失败 → 原因；有次品就给「打开次品」——次品也是花了额度换来的，
+  //          正文、表格、图片都在，只是公式没转全，名字里带着标记，
+  //          不会被当成正品
+  function runRow(r, it) {
+    var name = base((it && it.path) || r.pdf || r.docx || '');
+    if (r.ok) {
+      // 🔴 悬停能看到具体是第几个公式没转成 —— math_note 里写着，
+      //    不显示的话那个字段等于白写。
+      var tip = (r.docx || '') + (r.math_note ? (chr10() + r.math_note) : '');
+      return '<div class="it" title="' + esc(tip) + '">'
+        + dot(C.ok)
+        + '<span class="grow ell">' + esc(base(r.docx || name)) + '</span>'
+        // 🔴 秒回的那几份得说清楚为什么 —— 不标的话用户会以为根本没转。
+        + (r.cached
+            ? '<span class="rt f-dim" title="这份 PDF 和参数都没变，'
+              + '直接用了上次的识别结果，没有再传一遍、也没扣额度">缓存</span>'
+            : '')
+        + (r.line ? '<span class="rt ell" style="max-width:220px">'
+            + esc(r.line) + '</span>' : '')
+        + link('openFile', '打开', r.docx)
+        + link('openFolder', '文件夹', r.docx) + '</div>';
+    }
+    return '<div class="it" title="' + esc(r.error || '') + '">'
+      + dot(C.bad)
+      + '<span class="grow ell f-dim">' + esc(name) + '</span>'
+      + '<span class="rt f-bad ell" style="max-width:240px">'
+      + esc(r.cancelled ? '已停止' : ('失败：' + (r.error || ''))) + '</span>'
+      + (r.degraded
+          ? link('openFile', '打开次品', r.degraded)
+            + link('openFolder', '文件夹', r.degraded)
+          : '') + '</div>';
   }
 
   function worthReport(t) {
@@ -379,11 +402,217 @@
   }
 
   // ── 主屏 ─────────────────────────────────────────────────────────────
+  // ── 待办区 ───────────────────────────────────────────────────────────
+  //
+  // 转换中新拖进来的文件放这儿，**不混进主列表**。这一批转完自动晋升成
+  // 新一批（见 actions.promotePending），不用用户点。
+  //
+  // 🔴 为什么不混进主列表：混了就得在一张表里区分「这批的」和「下批的」，
+  //    而那正是「4 个文件下面又冒出一模一样 4 个」那个 bug 的土壤。
+  //    分开摆，一眼看清哪些在转、哪些排着。
+  function pendingBox(st, done) {
+    var ps = st.pending || [];
+    var lastOk = !!(st.lastResults && st.lastResults.length
+                    && worthReport({ results: st.lastResults }));
+    var lastBtn = lastOk
+      ? link('toggleLastReport',
+             st.showLastReport ? '返回列表' : '上一批的报告')
+      : '';
+
+    // 🔴 **转完之后这一块只剩「上一批的报告」。**
+    //    那时待办要么已经晋升成新一批、要么本来就没有；而「再加几份」在
+    //    结果页没有意义 —— 顶上已经有「再转一批」，那是回待转清单的正路，
+    //    两个入口做同一件事只会让人犹豫。
+    if (done) {
+      return lastOk
+        ? '<div class="it" style="font-size:11px"><span class="grow"></span>'
+          + lastBtn + '</div>'
+        : '';
+    }
+
+    var head = '<div class="it" style="font-size:11px">'
+      + '<span class="grow f-dim">'
+      + (st.pendingBusy
+          ? '正在看这几份…'
+          : ps.length
+            ? ('待办 ' + ps.length + ' 份，这批转完自动接上')
+            : '转换中也可以把 PDF 拖进来，排在这批后面转')
+      + '</span>'
+      + link('pickMore', '再加几份') + lastBtn + '</div>';
+    if (!ps.length) return head;
+    return head + ps.map(function (x) {
+      return '<div class="it" style="font-size:11px">'
+        + '<span style="flex:none;width:18px"></span>'
+        + '<span class="grow ell f-dim">' + esc(base(x.path)) + '</span>'
+        + '<span class="rt">' + (x.pages || 0) + ' 页</span>'
+        + link('delPending', '移除', x.path) + '</div>';
+    }).join('');
+  }
+
+  // ── 主屏 · 待转态 ────────────────────────────────────────────────────
+  function mainPick(st) {
+    var top = btn('pickFiles', '添加文件') + btn('pickDir', '添加文件夹')
+      + (st.items.length ? btn('clearAll', '移除全部') : '')
+      + '<span class="grow"></span>'
+      + '<span class="f-dim ell" style="max-width:240px" title="'
+      + esc(st.outDir || '跟原 PDF 放一起') + '">输出：'
+      + esc(st.outDir || '跟原 PDF 放一起') + '</span>'
+      + link('pickOutDir', '更改')
+      + (st.outDir ? link('useSourceDir', '还原') : '');
+
+    // 🔴 **正在读文件夹时必须说话。** 逐份体检要时间，书多的话十几秒；
+    //    这期间界面一个字不变，用户只会以为软件卡死了 ——「反应很慢」
+    //    的抱怨多半来自这里，而不是真的慢。（本地版实测 456 份 16 秒。）
+    if (st.scanning) {
+      return shell(top,
+        errBar(st)
+        + '<div class="fill">'
+        + '<div style="font-size:13px;font-weight:600">正在读取…</div>'
+        + '<div class="f-dim">逐份检查页数和文字层，文件夹里书多的话要等几秒</div>'
+        + (st.items.length
+            ? '<div class="f-dim">已经在列表里的 ' + st.items.length
+              + ' 份不受影响</div>'
+            : '')
+        + '</div>',
+        dot(C.dim) + '<span class="f-dim">读取中…</span>');
+    }
+
+    // 空列表也要**铺满**，拖放区是整个主区，不是居中一个小方框。
+    if (!st.items.length) {
+      return shell(top,
+        errBar(st)
+        + '<div class="fill' + (st.dragging ? ' drop' : '') + '">'
+        + '<div style="font-size:14px;font-weight:600">'
+        + (st.dragging ? '松手就行' : '把 PDF 拖进来') + '</div>'
+        + '<div class="f-dim">单个文件、多个文件、整个文件夹都行</div>'
+        + '<div style="display:flex;gap:8px;margin-top:4px">'
+        + btn('pickFiles', '选文件') + btn('pickDir', '选文件夹')
+        + '</div></div>',
+        botPick(st, []));
+    }
+
+    var sel = st.items.filter(function (x) { return x.ok && st.picked[x.path]; });
+    return shell(top,
+      errBar(st) + st.items.map(function (x) { return itemRow(x, st); }).join(''),
+      botPick(st, sel));
+  }
+
+  function botPick(st, sel) {
+    var tks = (st.env && st.env.tokens) || { list: [] };
+    var nTok = tks.count || (tks.list || []).length;
+    var usedAll = (tks.list || []).reduce(function (a, x) {
+      return a + (x.used || 0);
+    }, 0);
+    var pg = sel.reduce(function (a, x) { return a + (x.pages || 0); }, 0);
+    return dot(C.ok)
+      + '<span class="f-dim">' + nTok + ' 个 token'
+      + (usedAll ? ' · 今天已用 ' + usedAll + ' 页' : '') + '</span>'
+      + link('openSettings', '设置') + link('openHistory', '历史')
+      + '<span class="grow"></span>'
+      + '<span class="f-dim">' + (sel.length
+          ? ('选中 ' + sel.length + ' 份 · ' + pg + ' 页')
+          : '还没选中') + '</span>'
+      + btn('start', st.starting ? '正在开始…' : '开始转换',
+            { cls: 'primary', off: !sel.length || st.starting });
+  }
+
+  // ── 主屏 · 转换中 / 转完 ─────────────────────────────────────────────
+  //
+  // 🔴 **一张表。** 从 `st.items` 出发，把结果按路径贴到对应行上 ——
+  //    行的状态在变，表本身不变，不跳屏。
+  //
+  //    原来是「已完成 + 正在转 + 排队中 + 刚拖进来」四段拼接，除了跳屏
+  //    还出过一个 bug：点开始之后待选清单没清，同一批文件在下面又原样
+  //    列了一遍。一张表的结构里那种事压根不可能发生。
+  function mainRun(st) {
+    var t = st.task;
+    if (!t) {
+      return shell('', '<div class="fill"><div class="f-dim">正在开始…</div></div>', '');
+    }
+    var done = t.state === 'done' || t.state === 'cancelled';
+    var res = t.results || [];
+    var okN = 0;
+    res.forEach(function (r) { if (r.ok) okN++; });
+
+    var byPath = {};
+    res.forEach(function (r) { byPath[r.pdf] = r; });
+
+    var rows = st.items.filter(function (x) {
+      return x.ok && st.picked[x.path];
+    }).map(function (it, i) {
+      var r = byPath[it.path];
+      if (r) return runRow(r, it);
+      if (!done && i === t.current) {
+        // 正在转的那一份：把云端最后一句状态显示在右边
+        return '<div class="it on" title="' + esc(it.path) + '">' + dot(C.run)
+          + '<span class="grow ell">' + esc(base(it.path)) + '</span>'
+          + '<span class="rt ell" style="max-width:300px">'
+          + esc((t.lines || []).slice(-1)[0] || '正在处理…')
+          + '</span></div>';
+      }
+      // 还没轮到
+      return '<div class="it" title="' + esc(it.path) + '">' + dot(C.dim)
+        + '<span class="grow ell f-dim">' + esc(base(it.path)) + '</span>'
+        + '<span class="rt f-dim">' + (it.pages || 0) + ' 页 · 等着</span>'
+        + '</div>';
+    }).join('');
+
+    var top = done
+      ? '<span style="font-size:13px;font-weight:600">'
+        + (t.state === 'cancelled' ? '已停止' : '转换完成') + '</span>'
+        + '<span class="f-dim" style="margin-left:8px">'
+        + okN + ' 成 / ' + t.total + ' 份</span>'
+        + '<span class="grow"></span>'
+        + (worthReport(t) ? btn('toggleReport',
+            st.showReport ? '返回列表' : '看报告') : '')
+        + btn('newBatch', '再转一批', { cls: 'primary' })
+      : '<span style="font-size:13px;font-weight:600">正在转第 '
+        + ((t.current || 0) + 1) + ' / ' + t.total + ' 份</span>'
+        + '<span class="grow"></span>'
+        + '<span class="f-dim ell" style="max-width:240px">'
+        + '云端在跑，「停止」只是不再等它</span>'
+        + btn('stop', '停止');
+
+    var bot = dot(done ? (okN === t.total ? C.ok : C.bad) : C.run)
+      + '<span class="f-dim">' + esc(done ? '转完了' : (t.now || '准备中…'))
+      + '</span>'
+      + link('openSettings', '设置') + link('openHistory', '历史')
+      + '<span class="grow"></span>';
+
+    // 报告：本批
+    if (done && st.showReport) {
+      return shell(top, reportView(reportText(t)), bot);
+    }
+    // 报告：上一批（晋升之后还能看 —— 那些 Word 已经在用户硬盘里了）
+    if (st.showLastReport && st.lastResults && st.lastResults.length
+        && worthReport({ results: st.lastResults })) {
+      return shell(top,
+        pendingBox(st, done)
+        + reportView(reportText({ results: st.lastResults })), bot);
+    }
+
+    return shell(top,
+      errBar(st)
+      + (rows || '<div class="fill"><div class="f-dim">没有要转的文件</div></div>')
+      + pendingBox(st, done),
+      bot);
+  }
+
+  // 报告的壳。**返回按钮在内容前面** —— 内容区是 .fill（min-height:100%），
+  // 拼在它后面的东西会被顶到第一屏之外，620x440 的窗口里等于不存在。
+  function reportView(text) {
+    return '<div class="fill" style="justify-content:flex-start;gap:6px">'
+      + '<div style="align-self:flex-start">'
+      + btn('toggleReport', '← 返回列表') + '</div>'
+      + '<div class="log" data-keep-scroll="report"><span class="l">'
+      + esc(text).split(chr10()).join('</span><span class="l">')
+      + '</span></div></div>';
+  }
+
   function mainPage(st) {
     if (!st.ready) {
       return shell('', '<div class="fill"><div class="f-dim">正在启动…</div></div>', '');
     }
-
     var g = gate(st);
     if (g) return shell('', errBar(st) + gateView(g), '');
 
@@ -392,123 +621,9 @@
       return shell('', errBar(st) + tokenView(st),
                    link('openSettings', '设置') + link('openHistory', '历史'));
     }
-
-    var t = st.task;
-    var running = window.P2W_ISRUNNING(st);
-    var done = !!(t && (t.state === 'done' || t.state === 'cancelled'));
-
-    // 🔴 **转换进行中也给「添加文件」**（作者要的双队列）。但**不给
-    //    「更改输出目录」** —— 追加的文件跟着原来那一批的目录走，
-    //    这里改了也不生效，摆个改不动的按钮比没有更糟。
-    var top;
-    if (done) {
-      top = '';
-    } else if (running) {
-      top = btn('pickFiles', '添加文件') + btn('pickDir', '添加文件夹')
-        + '<span class="grow"></span>'
-        + '<span class="f-dim">转换中，新加的会排在后面</span>';
-    } else {
-      top = btn('pickFiles', '添加文件') + btn('pickDir', '添加文件夹')
-        + btn('clearAll', '移除全部', { off: !st.items.length })
-        + '<span class="grow"></span>'
-        + '<span class="f-dim ell" style="max-width:260px">输出：'
-        + esc(st.outDir || '跟原 PDF 放一起') + '</span>'
-        + link('pickOutDir', '更改')
-        + (st.outDir ? link('useSourceDir', '还原') : '');
-    }
-
-    var body;
-    if (done && st.showReport) {
-      // 🔴 返回按钮放在报告**前面**。老项目放后面，而内容区高度是
-      //    min-height:100%，按钮被挤到屏幕外，用户被困在报告页出不来。
-      body = '<div class="fill" style="justify-content:flex-start;gap:6px">'
-        + '<div style="align-self:flex-start">'
-        + btn('toggleReport', '← 返回列表') + '</div>'
-        + '<div class="log" data-keep-scroll="report"><span class="l">'
-        + esc(reportText(t)).split(chr10()).join('</span><span class="l">')
-        + '</span></div></div>';
-    } else if (running || done) {
-      body = (t.results || []).map(resultRow).join('')
-        + (running
-            ? '<div class="it">' + dot(C.run)
-              + '<span class="grow ell">' + esc(t.now || '准备中…') + '</span>'
-              + '<span class="rt ell" style="max-width:320px">'
-              + esc((t.lines || []).slice(-1)[0] || '正在处理…')
-              + '</span></div>'
-              // 已经排上队、还没轮到的
-              + (t.queued || []).map(function (nm) {
-                  return '<div class="it">' + dot(C.dim)
-                    + '<span class="grow ell f-dim">' + esc(nm) + '</span>'
-                    + '<span class="rt f-dim">排队中</span></div>';
-                }).join('')
-              // 刚拖进来、还没点「加入队列」的
-              + st.items.map(function (x) { return itemRow(x, st); }).join('')
-              + (st.scanning
-                  ? '<div class="it"><span class="grow f-dim">正在看新拖进来的…</span></div>'
-                  : '')
-            : '');
-    } else if (!st.items.length) {
-      body = '<div class="fill">'
-        + '<div style="font-size:13px">把 PDF 拖进来</div>'
-        + '<div class="f-dim">或者点左上角「添加文件」</div>'
-        + (st.scanning ? '<div class="f-dim">正在看这些文件…</div>' : '')
-        + '</div>';
-    } else {
-      body = st.items.map(function (x) { return itemRow(x, st); }).join('')
-        + (st.scanning
-            ? '<div class="it"><span class="grow f-dim">正在看新拖进来的…</span></div>'
-            : '');
-    }
-
-    var bot;
-    if (running) {
-      var waiting = (t.queued || []).length;
-      var newSel = st.items.filter(function (x) {
-        return x.ok && st.picked[x.path];
-      });
-      bot = dot(C.run)
-        + '<span>正在转第 ' + ((t.current || 0) + 1) + ' 份，共 ' + t.total + ' 份'
-        + (waiting ? '（还有 ' + waiting + ' 份排队）' : '') + '</span>'
-        + '<span class="grow"></span>'
-        + (newSel.length
-            ? btn('appendQueue',
-                  st.starting ? '正在加…' : '把选中的 ' + newSel.length + ' 份加进队列',
-                  { cls: 'primary', off: st.starting })
-            : '<span class="f-dim ell" style="max-width:230px">'
-              + '云端在跑，停止只是不再等它</span>')
-        + btn('stop', '停止');
-    } else if (done) {
-      var okn = (t.results || []).filter(function (r) { return r.ok; }).length;
-      bot = dot(okn === t.total ? C.ok : C.bad)
-        + '<span>转完了：' + okn + ' 成 / ' + t.total + ' 份'
-        + (t.state === 'cancelled' ? '（中途停了）' : '') + '</span>'
-        + '<span class="grow"></span>'
-        + (worthReport(t) && !st.showReport ? btn('toggleReport', '看报告') : '')
-        + btn('newBatch', '转下一批', { cls: 'primary' });
-    } else {
-      var sel = st.items.filter(function (x) {
-        return x.ok && st.picked[x.path];
-      });
-      var pg = sel.reduce(function (a, x) { return a + (x.pages || 0); }, 0);
-      var tks = (st.env && st.env.tokens) || { list: [] };
-      var nTok = tks.count || (tks.list || []).length;
-      var usedAll = (tks.list || []).reduce(function (a, x) {
-        return a + (x.used || 0);
-      }, 0);
-      bot = dot(C.ok)
-        + '<span class="f-dim">' + nTok + ' 个 token'
-        + (usedAll ? ' · 今天已用 ' + usedAll + ' 页' : '') + '</span>'
-        + link('openSettings', '设置') + link('openHistory', '历史')
-        + '<span class="grow"></span>'
-        + '<span class="f-dim">选中 ' + sel.length + ' 份 · ' + pg + ' 页</span>'
-        + btn('start', st.starting ? '正在开始…' : '开始转换',
-              { cls: 'primary', off: !sel.length || st.starting });
-    }
-
-    return shell(top, errBar(st) + body, bot);
+    return (window.P2W_ISRUNNING(st) || st.task) ? mainRun(st) : mainPick(st);
   }
 
-  // ── 历史屏 ───────────────────────────────────────────────────────────
   function historyPage(st) {
     var rows = st.runs || [];
     var body = rows.length

@@ -1,0 +1,10 @@
+# 🔴 MML2OMML.XSL 按二进制存，git 一个字节都不许动。
+#
+# 它是微软随 Office 分发的原件。不声明的话 core.autocrlf 会把 CRLF
+# 压成 LF —— 194432 字节进仓库变成 189705，少掉 4727 个字节（正好是
+# 4727 个 CRLF 各少一个 ）。功能上不影响（XML 解析器不在乎行尾），
+# 但那就不再是原件了，将来想校验「这确实是 Office 里那份」没法验。
+runtime/xsl/MML2OMML.XSL binary
+
+# pandoc 的许可证同理，原样保存
+runtime/pandoc/COPYRIGHT.txt -text

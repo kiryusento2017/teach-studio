@@ -27,6 +27,14 @@ var state = {
   picked: {},          // path -> 选没选
   outDir: '',          // 空 = 跟原 PDF 放一起
   scanning: false,
+  dragging: false,     // 文件正拖在窗口上（空列表时给「松手就行」）
+
+  // 待办：转换中新拖进来的文件排在这儿，**不混进 items**。
+  // 这一批转完自动晋升成新一批（见 actions.promotePending）。
+  pending: [],
+  pendingBusy: false,
+  lastResults: null,   // 上一批的结果，晋升之后还能看它的报告
+  showLastReport: false,
 
   taskId: '',
   task: null,          // 轮询结果
@@ -156,10 +164,28 @@ document.addEventListener('keydown', function (e) {
 
 // ── 拖进来 ─────────────────────────────────────────────────────────────
 
-document.addEventListener('dragover', function (e) { e.preventDefault(); });
+// 🔴 **转换中也收拖进来的文件**（进待办，不打断这一批）。
+//    dragging 只为了让空列表那一屏给一句「松手就行」——
+//    没有反馈的拖放区，用户不知道松手会不会有用。
+document.addEventListener('dragover', function (e) {
+  e.preventDefault();
+  if (!state.dragging && state.page === 'main') {
+    state.dragging = true;
+    render();
+  }
+});
+
+document.addEventListener('dragleave', function (e) {
+  // 拖到窗口外面才算离开：拖过子元素时也会冒出 dragleave，
+  // 不判断的话「松手就行」会一路闪烁。
+  if (e.relatedTarget) return;
+  if (state.dragging) { state.dragging = false; render(); }
+});
+
 document.addEventListener('drop', function (e) {
   e.preventDefault();
-  if (state.page !== 'main' || isRunning(state)) return;
+  state.dragging = false;
+  if (state.page !== 'main') return;
   var paths = [];
   for (var i = 0; i < e.dataTransfer.files.length; i++) {
     var f = e.dataTransfer.files[i];

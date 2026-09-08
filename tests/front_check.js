@@ -359,8 +359,20 @@ ck('一份都没勾就不给开始', () => {
 
 console.log('\n转换中：');
 
-function running(st) {
-  st.task = { state: 'running', current: 0, total: 2, now: 'a.pdf',
+const OK1 = { ok: true, pdf: 'D:/a.pdf', docx: 'D:/a.docx',
+              line: '12 页 ｜ 公式 40 ｜ 表格 2 ｜ 图 5 ｜ 公式是 Word 原生公式',
+              pages: 12, formulas: 40, formulas_xsl: 40, scan_pages: [] };
+const BAD1 = { ok: false, pdf: 'D:/b.pdf', error: '云端解析失败',
+               degraded: '', scan_pages: [] };
+
+// 🔴 转换中的列表是**从 st.items 画出来的**（结果按路径贴到对应行上），
+//    所以这两个辅助必须把 items 和 picked 一起造出来 —— 只设 st.task
+//    的话表是空的。这正是重构前后的关键差别。
+function running(st, files) {
+  files = files || ['D:/a.pdf', 'D:/b.pdf'];
+  st.items = files.map((p) => ({ ok: true, path: p, pages: 12, scan_pages: [] }));
+  st.items.forEach((x) => { st.picked[x.path] = true; });
+  st.task = { state: 'running', current: 0, total: files.length, now: 'a.pdf',
               lines: ['云端状态：running'], results: [] };
   st.taskId = '1';
   return st;
@@ -368,7 +380,7 @@ function running(st) {
 
 ck('显示第几份 / 共几份', () => {
   const h = main(running(ready(sb)));
-  if (!h.includes('正在转第 1 份，共 2 份')) throw new Error('没说进度');
+  if (!h.includes('正在转第 1 / 2 份')) throw new Error('没说进度');
 });
 
 ck('把云端那行状态透出来，不装作有百分比', () => {
@@ -380,92 +392,150 @@ ck('把云端那行状态透出来，不装作有百分比', () => {
 ck('停止按钮要说清楚只是不再等，不是真能停', () => {
   const h = main(running(ready(sb)));
   if (!h.includes('data-act="stop"')) throw new Error('没有停止按钮');
-  if (!h.includes('停止只是不再等它')) throw new Error('没说清停止的真实含义');
+  if (!h.includes('不再等')) throw new Error('没说清停止的真实含义');
 });
 
-ck('转换中也能加文件，但不给改输出目录', () => {
-  // 作者 2026-09-08 要的「双队列」：正转着还能往后面加，加进来的排队等。
-  // 🔴 但**不给改输出目录** —— 追加的文件跟着原来那一批走，摆个改不动的
-  //    按钮比没有更糟。
-  const st = running(ready(sb));
+ck('一张表：转过的、正在转的、还没轮到的都在同一张表里', () => {
+  // 🔴 这条钉住整个重构。原来是「已完成 + 正在转 + 排队中 + 刚拖进来」
+  //    四段拼接 —— 会跳屏，还出过「4 个文件下面又冒出一模一样 4 个」。
+  //    现在从 st.items 出发，一行一份，结果按路径贴上去。
+  const st = running(ready(sb), ['D:/a.pdf', 'D:/b.pdf', 'D:/c.pdf']);
+  st.task.current = 1;
+  st.task.results = [{ ok: true, pdf: 'D:/a.pdf', docx: 'D:/a.docx', line: '' }];
   const h = main(st);
-  if (!h.includes('data-act="pickFiles"')) throw new Error('转换中不让加文件了');
-  if (h.includes('data-act="pickOutDir"')) throw new Error('转换中不该给改输出目录');
+  if (!h.includes('a.docx')) throw new Error('转好的那份没显示产物名');
+  if (!h.includes('b.pdf')) throw new Error('正在转的那份没显示');
+  if (!h.includes('c.pdf')) throw new Error('还没轮到的那份没显示');
+  if (!h.includes('等着')) throw new Error('没标明哪些还没轮到');
+  // 每份只占一行 —— 数 class="it" 的个数，不数文件名出现次数
+  // （title 属性里也有路径，那不算重复）
+  // 主表的行都带 title=路径；待办区那几行没有，正好排除掉
+  const rows = (h.match(/<div class="it[^>]*title="D:/g) || []).length;
+  if (rows !== 3) throw new Error('主表该 3 行，实际 ' + rows + ' 行');
 });
 
-ck('排队中的文件要画出来，并说还有几份', () => {
-  const st = running(ready(sb));
-  st.task.queued = ['第二份.pdf', '第三份.pdf'];
-  const h = main(st);
-  if (!h.includes('第二份.pdf')) throw new Error('排队的没画出来');
-  if (!h.includes('排队中')) throw new Error('没标明是排队');
-  if (!h.includes('还有 2 份排队')) throw new Error('底栏没说还有几份');
+ck('点开始之后待转清单要留着，那张表靠它画', () => {
+  // 🔴 跟 2026-09-08 那次相反：当时为了修「下面又列一遍」把 items 清了，
+  //    那是打在症状上的补丁。换成一张表之后，清了反而没东西可画。
+  const sb2 = mkSandbox();
+  const st = ready(sb2);
+  st.items = [1, 2, 3, 4].map((i) => ({
+    ok: true, path: 'D:/' + i + '.pdf', pages: 1, scan_pages: [],
+  }));
+  st.items.forEach((x) => { st.picked[x.path] = true; });
+  sb2.window.P2W_RENDER = () => {};
+  sb2.window.P2W_HTTP = {
+    get: () => Promise.resolve({ rows: [] }),
+    post: () => Promise.resolve({ task_id: 'T1', total: 4 }),
+  };
+  vm.runInContext(R('app/renderer/actions.js'), sb2);
+  sb2.window.P2W_ACTS.start();
+  return new Promise((r) => setImmediate(r)).then(() => {
+    if (st.items.length !== 4) {
+      throw new Error('待转清单被清了，转换中的表就画不出来了');
+    }
+  });
 });
 
-ck('转换中选了新文件才给「加进队列」', () => {
-  const st = running(ready(sb));
-  if (main(st).includes('data-act="appendQueue"')) {
-    throw new Error('什么都没选就给了加入队列');
+console.log('');
+console.log('待办（转换中还能继续加）：');
+
+ck('没有待办时也把这条路说出来', () => {
+  const h = main(running(ready(sb)));
+  if (!h.includes('转换中也可以把 PDF 拖进来')) {
+    throw new Error('不说的话没人知道转着还能加');
   }
-  st.items = [{ ok: true, path: 'D:/new.pdf', pages: 5, scan_pages: [] }];
-  st.picked['D:/new.pdf'] = true;
+  if (!h.includes('data-act="pickMore"')) throw new Error('没有「再加几份」');
+});
+
+ck('有待办时说清几份、能单独移除', () => {
+  const st = running(ready(sb));
+  st.pending = [{ ok: true, path: 'D:/new1.pdf', pages: 7, scan_pages: [] },
+                { ok: true, path: 'D:/new2.pdf', pages: 3, scan_pages: [] }];
   const h = main(st);
-  if (!h.includes('data-act="appendQueue"')) throw new Error('选了却没给加入队列');
-  if (!h.includes('把选中的 1 份加进队列')) throw new Error('没说清加几份');
+  if (!h.includes('待办 2 份，这批转完自动接上')) throw new Error('没说清待办情况');
+  if (!h.includes('new1.pdf')) throw new Error('待办的文件名没显示');
+  if (!h.includes('7 页')) throw new Error('没显示页数');
+  if (!h.includes('data-act="delPending" data-arg="D:/new1.pdf"')) {
+    throw new Error('待办不能单独移除');
+  }
+});
+
+ck('待办不混进主表', () => {
+  // 🔴 混了就得在一张表里区分「这批的」和「下批的」，
+  //    那正是重构前那个 bug 的土壤。
+  const st = running(ready(sb), ['D:/a.pdf']);
+  st.pending = [{ ok: true, path: 'D:/new1.pdf', pages: 7, scan_pages: [] }];
+  const h = main(st);
+  const iMain = h.indexOf('a.pdf');
+  const iPend = h.indexOf('new1.pdf');
+  if (iPend < iMain) throw new Error('待办跑到主表前面去了');
+  if (!h.includes('待办')) throw new Error('待办没有自己的标题');
+});
+
+ck('正在体检待办时要说话', () => {
+  const st = running(ready(sb));
+  st.pendingBusy = true;
+  const h = main(st);
+  if (!h.includes('正在看这几份')) throw new Error('体检期间一声不吭');
+});
+
+ck('转完之后待办区只剩「上一批的报告」', () => {
+  const st = done(ready(sb), [OK1]);
+  st.pending = [];
+  st.lastResults = [BAD1];
+  const h = main(st);
+  if (!h.includes('data-act="toggleLastReport"')) throw new Error('看不了上一批的报告');
+  if (h.includes('data-act="pickMore"')) {
+    throw new Error('结果页还给「再加几份」—— 顶上已经有「再转一批」了');
+  }
+});
+
+ck('上一批全都干净就不给报告按钮', () => {
+  const st = done(ready(sb), [OK1]);
+  st.lastResults = [OK1];          // 全成功、没扫描页、公式全转成
+  const h = main(st);
+  if (h.includes('data-act="toggleLastReport"')) {
+    throw new Error('没什么可报的却摆了个按钮');
+  }
 });
 
 console.log('\n转完：');
 
 function done(st, results) {
-  st.task = { state: 'done', current: 2, total: results.length,
+  st.items = results.map((r) => ({
+    ok: true, path: r.pdf, pages: r.pages || 1, scan_pages: [],
+  }));
+  st.items.forEach((x) => { st.picked[x.path] = true; });
+  st.task = { state: 'done', current: results.length, total: results.length,
               now: '', lines: [], results: results };
   st.taskId = '1';
   return st;
 }
 
-const OK1 = { ok: true, pdf: 'D:/a.pdf', docx: 'D:/a.docx',
-              line: '12 页 ｜ 公式 40 ｜ 表格 2 ｜ 图 5 ｜ 公式是 Word 原生公式',
-              pages: 12, formulas: 40, formulas_xsl: 40, scan_pages: [] };
-const BAD1 = { ok: false, pdf: 'D:/b.pdf', error: '云端解析失败',
-               degraded: '', scan_pages: [] };
 
 ck('转完给每份的结果和打开入口', () => {
   const h = main(done(ready(sb), [OK1]));
   if (!h.includes('公式是 Word 原生公式')) throw new Error('没显示汇总');
   if (!h.includes('data-act="openFile"')) throw new Error('没有打开入口');
   if (!h.includes('data-act="openFolder"')) throw new Error('没有文件夹入口');
+  if (!h.includes('1 成 / 1 份')) throw new Error('没给这一批的总账');
 });
 
-ck('全都干净时不给「看报告」死按钮', () => {
-  const h = main(done(ready(sb), [OK1]));
-  if (h.includes('data-act="toggleReport"')) {
-    throw new Error('没东西可报还给了报告按钮');
-  }
-});
-
-ck('有失败时才给「看报告」', () => {
-  const h = main(done(ready(sb), [OK1, BAD1]));
-  if (!h.includes('data-act="toggleReport"')) throw new Error('该给报告按钮');
-});
-
-ck('报告页的返回按钮必须在报告内容【前面】', () => {
-  // 🔴 老项目栽过：按钮放在后面，而内容区 min-height:100%，
-  //    按钮被挤出屏幕，用户被困在报告页出不来（作者真机报的）。
-  const st = done(ready(sb), [OK1, BAD1]);
-  st.showReport = true;
+ck('用了缓存的那份要标出来', () => {
+  // 🔴 秒回的得说清楚为什么，不标的话用户会以为根本没转。
+  const st = done(ready(sb), [Object.assign({}, OK1, { cached: true })]);
   const h = main(st);
-  const btn = h.indexOf('data-act="toggleReport"');
-  const log = h.indexOf('class="log"');
-  if (btn < 0) throw new Error('报告页没有返回按钮');
-  if (log < 0) throw new Error('没画报告内容');
-  if (btn > log) throw new Error('返回按钮在报告后面，会被挤出屏幕');
+  if (!h.includes('缓存')) throw new Error('没标出这份是缓存命中的');
+  if (!h.includes('没扣额度')) throw new Error('没说清缓存意味着什么');
 });
 
-ck('报告开头要说明「没列出的不代表一定对」', () => {
-  const st = done(ready(sb), [OK1, BAD1]);
-  st.showReport = true;
+ck('公式没转全的写进悬停说明', () => {
+  const st = done(ready(sb), [Object.assign({}, OK1, {
+    math_note: '第 3、7 个公式没转成，保留了 LaTeX 原文',
+  })]);
   const h = main(st);
-  if (!h.includes('不代表一定对')) throw new Error('没有这句免责');
+  if (!h.includes('第 3、7 个公式没转成')) throw new Error('math_note 又白写了');
 });
 
 ck('失败的那份要显示原因', () => {
@@ -473,19 +543,187 @@ ck('失败的那份要显示原因', () => {
   if (!h.includes('云端解析失败')) throw new Error('没显示失败原因');
 });
 
-ck('公式没转全时，报告里要点出来', () => {
-  const half = Object.assign({}, OK1, { formulas: 40, formulas_xsl: 37 });
-  const st = done(ready(sb), [half]);
-  st.showReport = true;
+ck('有次品就给「打开次品」', () => {
+  // 次品是花了额度换来的：正文表格图片都在，只是公式没转全。
+  const st = done(ready(sb), [Object.assign({}, BAD1, {
+    degraded: 'D:/b【公式未完全转换】.docx',
+  })]);
   const h = main(st);
-  if (!h.includes('3 个公式没转成')) throw new Error('没点出差额');
+  if (!h.includes('打开次品')) throw new Error('次品拿不到');
+});
+
+ck('有失败时才给「看报告」', () => {
+  if (!main(done(ready(sb), [OK1, BAD1])).includes('data-act="toggleReport"')) {
+    throw new Error('有失败却不给报告');
+  }
+  if (main(done(ready(sb), [OK1])).includes('data-act="toggleReport"')) {
+    throw new Error('全都干净还给报告 —— 没什么可报的');
+  }
 });
 
 ck('中途停了要说明白', () => {
   const st = done(ready(sb), [OK1]);
   st.task.state = 'cancelled';
   const h = main(st);
-  if (!h.includes('中途停了')) throw new Error('没说明是被停的');
+  if (!h.includes('已停止')) throw new Error('没说明是被停的');
+});
+
+ck('报告页的返回按钮在报告前面', () => {
+  // 🔴 内容区是 .fill（min-height:100%），拼在它后面的东西会被顶到
+  //    第一屏之外 —— 620x440 的窗口里等于不存在。同一个坑栽过三次。
+  const st = done(ready(sb), [OK1, BAD1]);
+  st.showReport = true;
+  const h = main(st);
+  const iBtn = h.indexOf('data-act="toggleReport"');
+  const iLog = h.indexOf('class="log"');
+  if (iBtn < 0 || iLog < 0) throw new Error('报告页少东西');
+  if (iBtn > iLog) throw new Error('返回按钮在报告后面，会被挤出屏幕');
+});
+
+console.log('');
+console.log('待办晋升（转完自动接上）：');
+
+// 驱动 actions 的沙箱：假的 render / HTTP，记下都请求了什么。
+function mkActs(setup) {
+  const sb2 = mkSandbox();
+  const st = ready(sb2);
+  const asked = [];
+  const posted = [];
+  sb2.window.P2W_RENDER = () => {};
+  sb2.window.P2W_HTTP = {
+    get: (p) => {
+      asked.push(p);
+      if (p.indexOf('/api/convert/') === 0) {
+        return Promise.resolve(st.__pollReply || { state: 'running' });
+      }
+      if (p === '/api/env') return Promise.resolve(st.env);
+      return Promise.resolve({ rows: [] });
+    },
+    post: (p, body) => {
+      posted.push([p, body]);
+      if (p === '/api/scan') {
+        return Promise.resolve({ items: (body.paths || []).map((x) => ({
+          ok: true, path: x, pages: 5, scan_pages: [],
+        })) });
+      }
+      return Promise.resolve({ task_id: 'T2', total: (body.paths || []).length });
+    },
+  };
+  if (setup) setup(st);
+  vm.runInContext(R('app/renderer/actions.js'), sb2);
+  return { sb: sb2, st, asked, posted, acts: sb2.window.P2W_ACTS };
+}
+
+const tick = () => new Promise((r) => setImmediate(r));
+
+ck('转换中拖进来的进待办，不打断这一批', async () => {
+  const t = mkActs((st) => {
+    st.task = { state: 'running', current: 0, total: 1, results: [] };
+    st.taskId = 'T1';
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+    st.picked['D:/a.pdf'] = true;
+  });
+  t.acts.addPaths(['D:/new.pdf']);
+  await tick(); await tick();
+  if (t.st.pending.length !== 1) throw new Error('没进待办');
+  if (t.st.items.length !== 1) throw new Error('混进主列表了');
+  if (t.posted.some((x) => x[0] === '/api/convert')) {
+    throw new Error('打断了这一批，起了新任务');
+  }
+});
+
+ck('待办去重要比两样：待办里的、正在转的', async () => {
+  // 🔴 用户很可能把已经在转的某份又拖一次 —— 那份转出来会覆盖同一个
+  //    .docx，白花一次额度。
+  const t = mkActs((st) => {
+    st.task = { state: 'running', current: 0, total: 1, results: [] };
+    st.taskId = 'T1';
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+    st.picked['D:/a.pdf'] = true;
+    st.pending = [{ ok: true, path: 'D:/b.pdf', pages: 4, scan_pages: [] }];
+  });
+  t.acts.addPaths(['D:/a.pdf', 'D:/b.pdf', 'D:/c.pdf']);
+  await tick(); await tick();
+  const paths = t.st.pending.map((x) => x.path);
+  if (paths.length !== 2) throw new Error('该只多出 c.pdf，实际 ' + paths.join(','));
+  if (paths.indexOf('D:/c.pdf') < 0) throw new Error('新的那份没进去');
+});
+
+ck('这批转完，待办自动晋升成新一批', async () => {
+  const t = mkActs((st) => {
+    st.task = { state: 'running', current: 1, total: 1, results: [{ ok: true, pdf: 'D:/a.pdf' }] };
+    st.taskId = 'T1';
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+    st.picked['D:/a.pdf'] = true;
+    st.pending = [{ ok: true, path: 'D:/new.pdf', pages: 5, scan_pages: [] }];
+    st.__pollReply = { state: 'done', current: 1, total: 1,
+                       results: [{ ok: true, pdf: 'D:/a.pdf' }], lines: [] };
+  });
+  t.acts.__poll();
+  await tick(); await tick(); await tick();
+  if (t.st.pending.length !== 0) throw new Error('待办没清空');
+  if (t.st.items.length !== 1 || t.st.items[0].path !== 'D:/new.pdf') {
+    throw new Error('待办没变成新一批');
+  }
+  if (!t.posted.some((x) => x[0] === '/api/convert')) {
+    throw new Error('没起新任务');
+  }
+  // 上一批的结果要留着 —— 报告靠它
+  if (!t.st.lastResults || !t.st.lastResults.length) {
+    throw new Error('上一批的结果丢了，报告就看不了了');
+  }
+});
+
+ck('中途停了不自动起新一批，待办并回待转清单', async () => {
+  // 🔴 用户按了停止，不该反手又给他起一批。
+  const t = mkActs((st) => {
+    st.task = { state: 'running', current: 0, total: 1, results: [] };
+    st.taskId = 'T1';
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+    st.picked['D:/a.pdf'] = true;
+    st.pending = [{ ok: true, path: 'D:/new.pdf', pages: 5, scan_pages: [] }];
+    st.__pollReply = { state: 'cancelled', current: 0, total: 1,
+                       results: [], lines: [] };
+  });
+  t.acts.__poll();
+  await tick(); await tick(); await tick();
+  if (t.posted.some((x) => x[0] === '/api/convert')) {
+    throw new Error('停了还自动起新一批');
+  }
+  if (t.st.pending.length !== 0) throw new Error('待办没并回去');
+  if (!t.st.items.some((x) => x.path === 'D:/new.pdf')) {
+    throw new Error('待办没并进待转清单，那几份就没人管了');
+  }
+});
+
+ck('体检回来时这批已经转完了，也要自己补一次晋升', async () => {
+  // 🔴 扫一个文件夹要十几秒。等它回来时轮询可能早就拿到 done 了，
+  //    而那一刻 pending 还是空的，轮询走的是「没有待办」那条路。
+  //    不自己补判断的话，这几份会一直躺着没人管。
+  const t = mkActs((st) => {
+    st.task = { state: 'done', current: 1, total: 1,
+                results: [{ ok: true, pdf: 'D:/a.pdf' }] };
+    st.taskId = 'T1';
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+    st.picked['D:/a.pdf'] = true;
+  });
+  t.acts.addPaths(['D:/late.pdf']);
+  await tick(); await tick(); await tick();
+  if (!t.posted.some((x) => x[0] === '/api/convert')) {
+    throw new Error('体检回来发现已转完，却没有补晋升 —— 那几份会一直躺着');
+  }
+  if (t.st.items[0].path !== 'D:/late.pdf') throw new Error('没晋升成新一批');
+});
+
+ck('体检不过的不进待办', () => {
+  // 它在主队列里同样会当场失败，提前挡掉比让用户等到晋升之后才看见
+  // 一个红叉好。
+  const src = R('app/renderer/actions.js');
+  const i = src.indexOf('function addPending');
+  const seg = src.slice(i, i + 1400);
+  if (!/if \(x\.ok && !seen\[x\.path\]\)/.test(seg)) {
+    throw new Error('addPending 没有挡住体检不过的');
+  }
 });
 
 console.log('\n历史：');
@@ -633,54 +871,6 @@ function mkPollSandbox(replies) {
   vm.runInContext(R('app/renderer/actions.js'), sb);
   return { sb, st, count: () => drawn, poll: sb.window.P2W_ACTS.__poll };
 }
-
-ck('点开始之后，交出去的那些不再留在待选清单里', async () => {
-  // 🔴 2026-09-08 作者真机报的：扔 4 个进去点「开始转换」，界面上那 4 个
-  //    置灰了，**下面又原样冒出一模一样的 4 个**。
-  //
-  //    根因：start 提交成功后没清 st.items。以前转换中根本不显示待选
-  //    清单，所以这个疏漏一直看不出来；加了「转换中也能继续加文件」
-  //    （双队列）之后才露出来 —— 那一版把 st.items 也画进了转换中的
-  //    列表，而它里头装的还是刚交出去的那批。
-  //
-  //    appendQueue 一直是清的，start 漏了。同一件事两个地方做，
-  //    漏一个不报错，只是界面上多出一份。
-  const sb = mkSandbox();
-  const st = ready(sb);
-  st.items = [1, 2, 3, 4].map((i) => ({
-    ok: true, path: 'D:/' + i + '.pdf', pages: 1, scan_pages: [],
-  }));
-  st.items.forEach((x) => { st.picked[x.path] = true; });
-
-  sb.window.P2W_RENDER = () => {};
-  sb.window.P2W_HTTP = {
-    get: () => Promise.resolve({ rows: [] }),
-    post: () => Promise.resolve({ task_id: 'T1', total: 4 }),
-  };
-  vm.runInContext(R('app/renderer/actions.js'), sb);
-
-  sb.window.P2W_ACTS.start();
-  await new Promise((r) => setImmediate(r));   // 等那个 then 跑完
-
-  if (st.items.length !== 0) {
-    throw new Error('交出去了却还留着 ' + st.items.length + ' 个在待选清单里');
-  }
-  if (Object.keys(st.picked).length !== 0) {
-    throw new Error('勾选状态也该跟着清掉');
-  }
-});
-
-ck('转换中新拖进来的才显示在下面，而且能加进队列', () => {
-  // 上一条的反面：**该显示的时候要显示**。清空不能清过头 ——
-  // 转换中新拖进来的文件必须看得见、选得中、加得进队列，
-  // 那正是双队列的用处。
-  const st = running(ready(sb));
-  st.items = [{ ok: true, path: 'D:/new.pdf', pages: 5, scan_pages: [] }];
-  st.picked['D:/new.pdf'] = true;
-  const h = main(st);
-  if (!h.includes('new.pdf')) throw new Error('新拖进来的没显示');
-  if (!h.includes('data-act="appendQueue"')) throw new Error('加不进队列');
-});
 
 ck('转完要把用量也刷一遍，不只刷历史', async () => {
   // 🔴 账是**后端在提交那一刻就记好了**的（convert.py 的 note_pages），
