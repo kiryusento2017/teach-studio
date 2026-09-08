@@ -1,0 +1,14 @@
+# 🔴 token 是凭据，绝不进 git
+logs/
+_tmp/
+appdata/
+_scratch/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# pandoc.exe 有 222 MB —— GitHub 单文件上限 100 MB，进了历史就永远 push 不上去。
+# 它是运行时不是业务代码，更新也从不动它（分层策略见本地版 update.py）。
+runtime/pandoc/pandoc.exe

@@ -1,0 +1,11 @@
+{
+  "name": "pdf2word-cloud",
+  "version": "0.1.0",
+  "description": "PDF 转 Word · 云端版 · Electron 外壳",
+  "main": "main.js",
+  "private": true,
+  "author": "终末诗篇",
+  "license": "GPL-3.0-or-later",
+  "scripts": { "start": "electron ." },
+  "devDependencies": { "electron": "^44.0.0" }
+}
