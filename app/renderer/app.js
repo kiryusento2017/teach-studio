@@ -139,11 +139,6 @@ document.addEventListener('click', function (e) {
 document.addEventListener('change', function (e) {
   var t = e.target;
   if (!t || !t.getAttribute) return;
-  // 设置页那个「几个 token 栏」的下拉框
-  if (t.hasAttribute && t.hasAttribute('data-slots')) {
-    window.P2W_ACTS.setSlotCount(parseInt(t.value, 10) || 1);
-    return;
-  }
   if (t.getAttribute('data-check')) {
     var p = t.getAttribute('data-check');
     state.picked[p] = t.checked;

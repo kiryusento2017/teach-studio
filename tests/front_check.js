@@ -83,9 +83,9 @@ function ready(sb) {
     node: { ok: true }, pandoc: { ok: true },
     token: { ok: true, masked: 'sk-demo1...EXAMPLE9' },
     tokens: {
-      slots: 2, max_slots: 10, daily_pages: 1000,
-      list: [{ has: true, masked: 'sk-demo1...EXAMPLE9', used: 340 },
-             { has: false, masked: '', used: 0 }],
+      count: 2, max: 50, daily_pages: 1000,
+      list: [{ masked: 'sk-demo1...EXAMPLE9', used: 340 },
+             { masked: 'sk-demo2...EXAMPLE8', used: 12 }],
     },
     writable: true,
   };
@@ -149,37 +149,63 @@ ck('底栏显示 token 个数和今日用量，不显示 token 原文', () => {
   st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
   st.picked['D:/a.pdf'] = true;
   const h = main(st);
-  if (!h.includes('1 个 token')) throw new Error('没显示 token 个数');
-  if (!h.includes('今天已用 340 页')) throw new Error('没显示今日用量');
+  if (!h.includes('2 个 token')) throw new Error('没显示 token 个数');
+  // 340 + 12，几个号的用量要加总 —— 用户关心的是「今天一共用了多少」
+  if (!h.includes('今天已用 352 页')) throw new Error('没显示今日总用量');
   if (h.includes('EPUTTaAx')) throw new Error('把 token 原文画出来了');
 });
 
 console.log('');
 console.log('设置页：');
 
-ck('几个栏就画几行', () => {
+ck('有几个 token 就画几行', () => {
   const st = ready(sb);
   const h = settings(st);
-  if (!h.includes('第 1 个')) throw new Error('没画第 1 栏');
-  if (!h.includes('第 2 个')) throw new Error('没画第 2 栏');
-  if (h.includes('第 3 个')) throw new Error('画多了');
+  if (!h.includes('sk-demo1...EXAMPLE9')) throw new Error('第 1 个没画');
+  if (!h.includes('sk-demo2...EXAMPLE8')) throw new Error('第 2 个没画');
+  if (!h.includes('token（2 个）')) throw new Error('没说清一共几个');
 });
 
-ck('栏数下拉框能选到 10，当前值被选中', () => {
+ck('每一行都能换、能删', () => {
   const st = ready(sb);
   const h = settings(st);
-  if (!h.includes('data-slots')) throw new Error('没有下拉框');
-  if (!h.includes('<option value="10"')) throw new Error('选不到 10');
-  if (!h.includes('<option value="2" selected')) throw new Error('当前值没选中');
+  if (!h.includes('data-act="editSlot" data-arg="0"')) throw new Error('第 1 行不能换');
+  if (!h.includes('data-act="clearSlot" data-arg="1"')) throw new Error('第 2 行不能删');
+  // 用量要分行显示 —— 挑号是按「今天谁用得少」，看不见就无从判断
+  if (!h.includes('今天用了 340 页')) throw new Error('没显示这一行的用量');
 });
 
-ck('已填的栏显示打码版和用量，没填的给「填这个」', () => {
+ck('「+ 添加」点了才出输入框，不占位', () => {
   const st = ready(sb);
+  let h = settings(st);
+  if (!h.includes('data-act="addSlot"')) throw new Error('没有「+ 添加」');
+  if (h.includes('id="tokenbox"')) throw new Error('没点就冒出输入框了');
+  st.editSlot = 'new';
+  h = settings(st);
+  if (!h.includes('id="tokenbox"')) throw new Error('点了却没有输入框');
+  if (!h.includes('新的')) throw new Error('没标明这是新加的一行');
+  // 正在添的时候不该还能再点「+ 添加」
+  const i = h.indexOf('data-act="addSlot"');
+  const tag = h.slice(h.lastIndexOf('<button', i), h.indexOf('>', i));
+  if (!tag.includes('disabled')) throw new Error('添加中还能再点添加');
+});
+
+ck('一个都没有时给条明路', () => {
+  const st = ready(sb);
+  st.env.tokens = { count: 0, max: 50, list: [] };
   const h = settings(st);
-  if (!h.includes('sk-demo1...EXAMPLE9')) throw new Error('没显示打码 token');
-  if (h.includes('EPUTTaAx')) throw new Error('把 token 原文画出来了');
-  if (!h.includes('今天用了 340 页')) throw new Error('没显示这一栏的用量');
-  if (!h.includes('data-act="editSlot" data-arg="1"')) throw new Error('空栏没给填入口');
+  if (!h.includes('+ 添加')) throw new Error('没给添加入口');
+  if (!h.includes('一个都还没有')) throw new Error('空着却不说话');
+});
+
+ck('到上限就不给「+ 添加」，并说明原因', () => {
+  const st = ready(sb);
+  const many = [];
+  for (let i = 0; i < 50; i++) many.push({ masked: 'sk-x...' + i, used: 0 });
+  st.env.tokens = { count: 50, max: 50, list: many };
+  const h = settings(st);
+  if (h.includes('data-act="addSlot"')) throw new Error('到上限还给添加');
+  if (!h.includes('已经 50 个了')) throw new Error('没说为什么不给加');
 });
 
 ck('点某一栏才出输入框，且只出一个', () => {
@@ -191,6 +217,7 @@ ck('点某一栏才出输入框，且只出一个', () => {
     throw new Error('画出了不止一个输入框');
   }
   if (!h.includes('data-act="saveSlot"')) throw new Error('没有保存按钮');
+  if (!h.includes('第 2 个')) throw new Error('没标明在改第几个');
 });
 
 ck('正在验的时候保存按钮变灰，不给连点', () => {
@@ -606,6 +633,54 @@ function mkPollSandbox(replies) {
   vm.runInContext(R('app/renderer/actions.js'), sb);
   return { sb, st, count: () => drawn, poll: sb.window.P2W_ACTS.__poll };
 }
+
+ck('点开始之后，交出去的那些不再留在待选清单里', async () => {
+  // 🔴 2026-09-08 作者真机报的：扔 4 个进去点「开始转换」，界面上那 4 个
+  //    置灰了，**下面又原样冒出一模一样的 4 个**。
+  //
+  //    根因：start 提交成功后没清 st.items。以前转换中根本不显示待选
+  //    清单，所以这个疏漏一直看不出来；加了「转换中也能继续加文件」
+  //    （双队列）之后才露出来 —— 那一版把 st.items 也画进了转换中的
+  //    列表，而它里头装的还是刚交出去的那批。
+  //
+  //    appendQueue 一直是清的，start 漏了。同一件事两个地方做，
+  //    漏一个不报错，只是界面上多出一份。
+  const sb = mkSandbox();
+  const st = ready(sb);
+  st.items = [1, 2, 3, 4].map((i) => ({
+    ok: true, path: 'D:/' + i + '.pdf', pages: 1, scan_pages: [],
+  }));
+  st.items.forEach((x) => { st.picked[x.path] = true; });
+
+  sb.window.P2W_RENDER = () => {};
+  sb.window.P2W_HTTP = {
+    get: () => Promise.resolve({ rows: [] }),
+    post: () => Promise.resolve({ task_id: 'T1', total: 4 }),
+  };
+  vm.runInContext(R('app/renderer/actions.js'), sb);
+
+  sb.window.P2W_ACTS.start();
+  await new Promise((r) => setImmediate(r));   // 等那个 then 跑完
+
+  if (st.items.length !== 0) {
+    throw new Error('交出去了却还留着 ' + st.items.length + ' 个在待选清单里');
+  }
+  if (Object.keys(st.picked).length !== 0) {
+    throw new Error('勾选状态也该跟着清掉');
+  }
+});
+
+ck('转换中新拖进来的才显示在下面，而且能加进队列', () => {
+  // 上一条的反面：**该显示的时候要显示**。清空不能清过头 ——
+  // 转换中新拖进来的文件必须看得见、选得中、加得进队列，
+  // 那正是双队列的用处。
+  const st = running(ready(sb));
+  st.items = [{ ok: true, path: 'D:/new.pdf', pages: 5, scan_pages: [] }];
+  st.picked['D:/new.pdf'] = true;
+  const h = main(st);
+  if (!h.includes('new.pdf')) throw new Error('新拖进来的没显示');
+  if (!h.includes('data-act="appendQueue"')) throw new Error('加不进队列');
+});
 
 ck('actions 暴露了 poll 供测试驱动', () => {
   const src = R('app/renderer/actions.js');

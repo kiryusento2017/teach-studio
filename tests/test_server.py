@@ -28,6 +28,58 @@ import store             # noqa: E402
 client = TestClient(srv.app)
 
 
+# ── 🔴 全局隔离：测试永不碰真实的 logs/ ────────────────────────────────
+#
+# 2026-09-08 栽过一次：有个测试类没隔离，直接操作真实的
+# logs/token.json，而当天 `set_token` 的语义刚从「覆盖第一个」改成
+# 「只留这一个」—— 跑一次测试就把用户的两个 token 覆盖成一个，
+# 人家的 API 凭据没了。
+#
+# 靠「每个测试类自己记得隔离」是靠不住的：加新测试的人不一定知道这条
+# 规矩，而漏了**不会报错**，只会安静地写坏真实文件。所以在模块级别兜住。
+_REAL_STORE_PATHS = {}
+_TEST_HOME = [None]
+
+
+def setUpModule():
+    _TEST_HOME[0] = tempfile.mkdtemp(prefix='p2w_tests_')
+    for name in ('TOKEN_FILE', 'USAGE_FILE', 'RUNS_FILE'):
+        _REAL_STORE_PATHS[name] = getattr(store, name)
+        setattr(store, name,
+                os.path.join(_TEST_HOME[0], name.lower() + '.json'))
+
+
+def tearDownModule():
+    for name, real in _REAL_STORE_PATHS.items():
+        setattr(store, name, real)
+    if _TEST_HOME[0]:
+        shutil.rmtree(_TEST_HOME[0], ignore_errors=True)
+
+
+class Test测试自身的隔离(unittest.TestCase):
+    r"""护栏：确认测试真的没在碰真实文件。
+
+    这条测试存在的理由就是上面那次事故 —— 那种破坏是**静默**的，
+    不会有任何测试变红，只有用户下次打开软件发现 token 少了。
+    """
+
+    def test_三个落盘路径都指向临时目录(self):
+        home = _TEST_HOME[0]
+        self.assertTrue(home)
+        for name in ('TOKEN_FILE', 'USAGE_FILE', 'RUNS_FILE'):
+            p = os.path.abspath(getattr(store, name))
+            self.assertTrue(p.startswith(os.path.abspath(home)),
+                            '%s 指向 %s，不在临时目录里' % (name, p))
+
+    def test_没指向项目里的logs目录(self):
+        real_logs = os.path.abspath(os.path.join(ROOT, 'logs'))
+        for name in ('TOKEN_FILE', 'USAGE_FILE', 'RUNS_FILE'):
+            p = os.path.abspath(getattr(store, name))
+            self.assertFalse(p.startswith(real_logs),
+                             '%s 还指着真实的 logs/：%s' % (name, p))
+
+
+
 def _pdf(path, pages=1, text='hello world enough characters'):
     import pymupdf
     d = pymupdf.open()
@@ -140,41 +192,6 @@ class Test体检(unittest.TestCase):
         d = client.post('/api/scan', json={'paths': [self.w]}).json()
         self.assertEqual(len(d['items']), 2)
 
-
-class Testtoken接口(unittest.TestCase):
-
-    def setUp(self):
-        self._old = store.get_token()
-        self._chk = mineru_api.check_token
-
-    def tearDown(self):
-        mineru_api.check_token = self._chk
-        store.set_token(self._old)
-
-    def test_存之前先验一次验不过就不存(self):
-        r"""🔴 不验的话，用户要等到转第一份失败才知道填错了 —— 而那时候
-        文件已经传上去了。验一次不消耗解析额度，没有理由不验。"""
-        store.set_token('sk-good-old-one')
-        mineru_api.check_token = lambda t, timeout=20: (False, 'token 不对')
-        r = client.post('/api/token', json={'token': 'sk-bad'})
-        self.assertEqual(r.status_code, 400)
-        self.assertIn('不对', r.json()['detail'])
-        # **原来那个好的不能被覆盖**
-        self.assertEqual(store.get_token(), 'sk-good-old-one')
-
-    def test_验过了才存并且只回打码版(self):
-        mineru_api.check_token = lambda t, timeout=20: (True, '')
-        r = client.post('/api/token', json={'token': 'sk-1234567890abcdefgh'})
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(store.get_token(), 'sk-1234567890abcdefgh')
-        self.assertNotIn('1234567890', json.dumps(r.json()))
-
-    def test_传空串等于删掉(self):
-        mineru_api.check_token = lambda t, timeout=20: (True, '')
-        client.post('/api/token', json={'token': 'sk-x1234567890abcdef'})
-        r = client.post('/api/token', json={'token': ''})
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(store.get_token(), '')
 
 
 class Test转换(unittest.TestCase):
@@ -607,11 +624,14 @@ class Test失败路径(unittest.TestCase):
 
 
 class Test多个token(unittest.TestCase):
-    r"""多个 mineru 账号轮着用。
+    r"""攒多个 mineru 账号轮着用。
 
     背景：mineru 一个手机号能注册一个账号、微信能再注册一个，号与号之间
-    额度独立。作者 2026-09-08 要的：设置里能开 1~10 个 token 栏，转换时
-    自动挑用得少的那个，某个号满了自动换下一个。
+    额度独立。作者 2026-09-08 先定了「设置里选 1~10 栏」，同一天改成
+    **不设栏数**：想加几个加几个，每一行自带「换」「删」。
+
+    改的理由是「栏」这层概念是多余的 —— 它还会冒出「空栏」这种既不算
+    有 token 也不算没有的中间态，增删改各要考虑一遍。现在栏数 = token 数。
     """
 
     def setUp(self):
@@ -626,85 +646,90 @@ class Test多个token(unittest.TestCase):
         self.store.TOKEN_FILE, self.store.USAGE_FILE = self._tf, self._uf
         shutil.rmtree(self.w, ignore_errors=True)
 
-    # ── 槽位 ──────────────────────────────────────────────────────────
+    # ── 增删改 ────────────────────────────────────────────────────────
 
-    def test_默认两个栏(self):
-        self.assertEqual(self.store.slot_count(), 2)
-        self.assertEqual(len(self.store.token_slots()), 2)
+    def test_一开始一个都没有(self):
+        self.assertEqual(self.store.all_tokens(), [])
+        self.assertEqual(self.store.token_count(), 0)
+        self.assertEqual(self.store.get_token(), '')
 
-    def test_栏数只能在1到10之间(self):
+    def test_添在末尾(self):
         st = self.store
-        st.set_slot_count(0)
-        self.assertEqual(st.slot_count(), 1)
-        st.set_slot_count(99)
-        self.assertEqual(st.slot_count(), st.MAX_SLOTS)
-        st.set_slot_count('不是数字')
-        self.assertEqual(st.slot_count(), st.MAX_SLOTS)   # 坏值不改动现状
+        self.assertEqual(st.add_token('sk-a'), (True, ''))
+        self.assertEqual(st.add_token('sk-b'), (True, ''))
+        self.assertEqual(st.all_tokens(), ['sk-a', 'sk-b'])
 
-    def test_栏数调小不丢token(self):
-        r"""🔴 这条是刻意设计的行为，不是巧合。
-
-        本来打算调小就截断，那就得在界面上弹「这会删掉第 3、4 个 token」。
-        填 token 要去网站复制，误删一次很烦 —— 所以藏起来不删。
-        """
+    def test_重复的加不进去(self):
+        r"""🔴 存重了两条其实是一个号，调度会以为有双倍额度。"""
         st = self.store
-        st.set_slot_count(4)
-        for i, t in enumerate(['sk-a', 'sk-b', 'sk-c', 'sk-d']):
-            st.set_token_slot(i, t)
-        st.set_slot_count(2)
-        self.assertEqual(st.token_slots(), ['sk-a', 'sk-b'])
-        self.assertEqual(st.usable_tokens(), ['sk-a', 'sk-b'])   # 藏的不参与调度
-        st.set_slot_count(4)
-        self.assertEqual(st.token_slots(), ['sk-a', 'sk-b', 'sk-c', 'sk-d'])
+        st.add_token('sk-a')
+        ok, why = st.add_token('sk-a')
+        self.assertFalse(ok)
+        self.assertIn('第 1 个', why)
+        self.assertEqual(st.token_count(), 1)
 
-    def test_减栏时填过的会往前排不会凭空消失(self):
-        r"""🔴 作者 2026-09-08 追问「减少会出现什么情况」时想出来的。
+    def test_空的加不进去(self):
+        self.assertFalse(self.store.add_token('')[0])
+        self.assertFalse(self.store.add_token('   ')[0])
 
-        第 1 栏空着、token 在第 2 栏，减到 1 栏 —— 要是直接砍掉后面的，
-        可用 token 就归零了，软件退回「还没填 token」，用户以为被删了。
-        """
+    def test_换掉某一个(self):
         st = self.store
-        st.set_slot_count(2)
-        st.set_token_slot(1, 'sk-only-one')      # 只填第 2 栏
-        self.assertEqual(st.token_slots(), ['', 'sk-only-one'])
-        st.set_slot_count(1)
-        self.assertEqual(st.usable_tokens(), ['sk-only-one'])   # 还在
-        self.assertEqual(st.get_token(), 'sk-only-one')
+        st.add_token('sk-a')
+        st.add_token('sk-b')
+        st.set_token_slot(0, 'sk-new')
+        self.assertEqual(st.all_tokens(), ['sk-new', 'sk-b'])
 
-    def test_减栏只挤掉多出来的那些(self):
+    def test_删掉某一个后面的往前挪(self):
         st = self.store
-        st.set_slot_count(3)
-        for i, t in enumerate(['sk-a', 'sk-b', 'sk-c']):
-            st.set_token_slot(i, t)
-        st.set_slot_count(2)
-        self.assertEqual(st.usable_tokens(), ['sk-a', 'sk-b'])
-        st.set_slot_count(3)
-        self.assertEqual(st.token_slots(), ['sk-a', 'sk-b', 'sk-c'])
+        for t in ('sk-a', 'sk-b', 'sk-c'):
+            st.add_token(t)
+        st.remove_token(1)
+        self.assertEqual(st.all_tokens(), ['sk-a', 'sk-c'])
 
-    def test_改一个栏不会抹掉藏起来的(self):
+    def test_越界的改不动也删不掉(self):
         st = self.store
-        st.set_slot_count(3)
-        for i, t in enumerate(['sk-a', 'sk-b', 'sk-c']):
-            st.set_token_slot(i, t)
-        st.set_slot_count(1)
-        st.set_token_slot(0, 'sk-new')      # 只动第 1 栏
-        st.set_slot_count(3)
-        self.assertEqual(st.token_slots(), ['sk-new', 'sk-b', 'sk-c'])
+        st.add_token('sk-a')
+        self.assertFalse(st.set_token_slot(5, 'sk-x'))
+        self.assertFalse(st.set_token_slot(-1, 'sk-x'))
+        self.assertFalse(st.remove_token(9))
+        self.assertEqual(st.all_tokens(), ['sk-a'])
 
-    def test_越界的栏写不进去(self):
-        self.assertFalse(self.store.set_token_slot(9, 'sk-x'))
-        self.assertFalse(self.store.set_token_slot(-1, 'sk-x'))
+    def test_删光了连文件一起删掉(self):
+        r"""别留一个 {"tokens": []} 的空壳在磁盘上。"""
+        st = self.store
+        st.add_token('sk-a')
+        st.remove_token(0)
+        self.assertFalse(os.path.isfile(st.TOKEN_FILE))
+        self.assertEqual(st.all_tokens(), [])
 
-    def test_认得老格式的单个token(self):
-        r"""早先存的是 {"token": "sk-x"}，升级后要能读出来当第 1 栏。"""
+    def test_有个防手滑的天花板(self):
+        r"""不是功能限制 —— 每个 token 都要去 mineru 注册一个账号，
+        正常没人有 50 个。留着是防代码出 bug 往里塞。"""
+        st = self.store
+        for i in range(st.MAX_TOKENS):
+            self.assertTrue(st.add_token('sk-%03d' % i)[0])
+        ok, why = st.add_token('sk-one-more')
+        self.assertFalse(ok)
+        self.assertIn('50', why)
+
+    # ── 老格式 ────────────────────────────────────────────────────────
+
+    def test_认得最早那版的单个token(self):
         io.open(self.store.TOKEN_FILE, 'w', encoding='utf-8').write(
             '{"token": "sk-old"}')
-        self.assertEqual(self.store.token_slots()[0], 'sk-old')
+        self.assertEqual(self.store.all_tokens(), ['sk-old'])
         self.assertEqual(self.store.get_token(), 'sk-old')
+
+    def test_认得中间那版的空栏格式(self):
+        r"""中间那版有固定栏数，没填的位置是空串。空栏在这儿被滤掉 ——
+        现在没有「空栏」这个概念了。"""
+        io.open(self.store.TOKEN_FILE, 'w', encoding='utf-8').write(
+            '{"slots": 4, "tokens": ["sk-a", "", "sk-c", ""]}')
+        self.assertEqual(self.store.all_tokens(), ['sk-a', 'sk-c'])
 
     def test_设置文件坏了也不崩(self):
         io.open(self.store.TOKEN_FILE, 'w', encoding='utf-8').write('不是 json')
-        self.assertEqual(self.store.slot_count(), self.store.DEFAULT_SLOTS)
+        self.assertEqual(self.store.all_tokens(), [])
         self.assertEqual(self.store.usable_tokens(), [])
 
     # ── 记账 ──────────────────────────────────────────────────────────
@@ -747,31 +772,35 @@ class Test多个token(unittest.TestCase):
         self.assertGreaterEqual(st.used_today('sk-a'), st.DAILY_PAGES)
         self.assertLessEqual(st.left_today('sk-a'), 0)
 
+    def test_换掉token之后账从零算起(self):
+        r"""账是按 token 指纹记的，换了 token 指纹跟着变，旧账自然作废。"""
+        st = self.store
+        st.add_token('sk-old')
+        st.note_pages('sk-old', 500)
+        st.set_token_slot(0, 'sk-brand-new')
+        self.assertEqual(st.used_today('sk-brand-new'), 0)
+
     # ── 挑号 ──────────────────────────────────────────────────────────
 
     def test_用得少的排前面(self):
-        r"""作者问的场景：1 号只剩 3 页、这份要 30 页，怎么办 ——
+        r"""作者问过的场景：1 号只剩 3 页、这份要 30 页，怎么办 ——
 
         一份 PDF 拆不开（拆了是两份 Word，跨页的表格公式会断），
         所以只能整份挑一个号。按剩余排序，2 号自然排前面。
         """
         st = self.store
-        st.set_slot_count(2)
-        st.set_token_slot(0, 'sk-a')
-        st.set_token_slot(1, 'sk-b')
+        st.add_token('sk-a')
+        st.add_token('sk-b')
         st.note_pages('sk-a', st.DAILY_PAGES - 3)     # 1 号只剩 3 页
         self.assertEqual(st.pick_order(), ['sk-b', 'sk-a'])
 
     def test_剩得多的排前面就等于够的排前面(self):
-        r"""🔴 为什么没有单独一层「够不够」的筛选。
-
-        剩得多的号必然先够，所以两种排法结果永远相同。写了那一层等于
-        写了一段永远不改变结果的代码 —— 2026-09-08 加过又拆掉了。
-        """
+        r"""🔴 为什么没有单独一层「够不够」的筛选：剩得多的号必然先够，
+        两种排法结果永远相同。写了那一层等于写了一段永远不改变结果的
+        代码 —— 2026-09-08 加过又拆掉了。"""
         st = self.store
-        st.set_slot_count(2)
-        st.set_token_slot(0, 'sk-a')
-        st.set_token_slot(1, 'sk-b')
+        st.add_token('sk-a')
+        st.add_token('sk-b')
         st.note_pages('sk-a', st.DAILY_PAGES - 30)    # a 剩 30
         st.note_pages('sk-b', st.DAILY_PAGES - 20)    # b 剩 20
         for pages in (0, 10, 25, 50, 999):
@@ -779,9 +808,8 @@ class Test多个token(unittest.TestCase):
 
     def test_全都不够时说得出来(self):
         st = self.store
-        st.set_slot_count(2)
-        st.set_token_slot(0, 'sk-a')
-        st.set_token_slot(1, 'sk-b')
+        st.add_token('sk-a')
+        st.add_token('sk-b')
         st.note_pages('sk-a', st.DAILY_PAGES - 30)
         st.note_pages('sk-b', st.DAILY_PAGES - 20)
         self.assertFalse(st.all_short(25))    # a 还够
@@ -795,11 +823,12 @@ class Test多个token(unittest.TestCase):
 
     def test_只有一个token时原样返回(self):
         st = self.store
-        st.set_token_slot(0, 'sk-only')
+        st.add_token('sk-only')
         self.assertEqual(st.pick_order(), ['sk-only'])
 
     def test_一个都没填时是空的(self):
         self.assertEqual(self.store.pick_order(), [])
+
 
 
 class Test调度换号(unittest.TestCase):
@@ -900,6 +929,12 @@ class Test调度换号(unittest.TestCase):
 
 
 class Test设置接口(unittest.TestCase):
+    r"""一个 POST /api/token 管增删改：
+
+        slot 省略（-1） + 有内容  → 添一个
+        slot = i        + 有内容  → 换掉第 i 个
+        slot = i        + 空内容  → 删掉第 i 个
+    """
 
     def setUp(self):
         import store
@@ -907,60 +942,103 @@ class Test设置接口(unittest.TestCase):
         self.w = tempfile.mkdtemp(prefix='p2ws_')
         self._tf = store.TOKEN_FILE
         store.TOKEN_FILE = os.path.join(self.w, 'token.json')
+        self._chk = srv.mineru_api.check_token
+        srv.mineru_api.check_token = lambda t, **k: (True, '')   # 不真连网
 
     def tearDown(self):
         self.store.TOKEN_FILE = self._tf
+        srv.mineru_api.check_token = self._chk
         shutil.rmtree(self.w, ignore_errors=True)
 
-    def test_改栏数(self):
-        r = client.post('/api/slots', json={'slots': 5})
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()['slots'], 5)
+    def test_不带slot就是添一个(self):
+        r = client.post('/api/token', json={'token': 'sk-first'})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()['count'], 1)
+        self.assertEqual(self.store.all_tokens(), ['sk-first'])
 
-    def test_栏数超范围要拒(self):
-        for bad in (0, -1, 11, 999):
-            r = client.post('/api/slots', json={'slots': bad})
-            self.assertEqual(r.status_code, 400, bad)
+    def test_带slot是换掉那一个(self):
+        self.store.add_token('sk-a')
+        self.store.add_token('sk-b')
+        r = client.post('/api/token', json={'token': 'sk-new', 'slot': 0})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.store.all_tokens(), ['sk-new', 'sk-b'])
 
-    def test_同一个token不许填两栏(self):
-        r"""🔴 填重了两栏其实是一个号，调度会以为有双倍额度。"""
-        self.store.set_slot_count(2)
-        self.store.set_token_slot(0, 'sk-same-one')
-        r = client.post('/api/token', json={'token': 'sk-same-one', 'slot': 1})
+    def test_空内容是删掉那一个(self):
+        self.store.add_token('sk-a')
+        self.store.add_token('sk-b')
+        r = client.post('/api/token', json={'token': '', 'slot': 0})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.store.all_tokens(), ['sk-b'])
+
+    def test_删不存在的那个要拒(self):
+        r = client.post('/api/token', json={'token': '', 'slot': 3})
         self.assertEqual(r.status_code, 400)
-        self.assertIn('第 1 栏', r.json()['detail'])
 
-    def test_跟收起来的token撞车也要拒(self):
-        r"""🔴 藏起来的号也是号。只查可见栏的话，栏数调回去就成了两个
-        一模一样的 token，调度会以为有双倍额度。"""
-        st = self.store
-        st.set_slot_count(3)
-        for i, t in enumerate(['sk-a', 'sk-b', 'sk-hidden-one']):
-            st.set_token_slot(i, t)
-        st.set_slot_count(1)                      # 后两栏收起来了
-        r = client.post('/api/token', json={'token': 'sk-hidden-one', 'slot': 0})
-        self.assertEqual(r.status_code, 400)
-        self.assertIn('收起来', r.json()['detail'])
-
-    def test_写不存在的栏要拒(self):
-        self.store.set_slot_count(2)
+    def test_换不存在的那个要拒(self):
         r = client.post('/api/token', json={'token': 'sk-x', 'slot': 7})
         self.assertEqual(r.status_code, 400)
 
-    def test_清空某一栏不用验token(self):
-        self.store.set_slot_count(2)
-        self.store.set_token_slot(0, 'sk-a')
-        r = client.post('/api/token', json={'token': '', 'slot': 0})
-        self.assertEqual(r.status_code, 200)
-        self.assertFalse(r.json()['has'])
+    def test_重复的token要拒(self):
+        r"""🔴 存重了两条其实是一个号，调度会以为有双倍额度。"""
+        self.store.add_token('sk-same-one')
+        r = client.post('/api/token', json={'token': 'sk-same-one'})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('第 1 个', r.json()['detail'])
 
-    def test_env里给出每一栏的状态但不给原文(self):
-        self.store.set_slot_count(2)
-        self.store.set_token_slot(0, 'sk-abcdefghijklmnopqrst')
+    def test_到上限不给加(self):
+        for i in range(self.store.MAX_TOKENS):
+            self.store.add_token('sk-%03d' % i)
+        r = client.post('/api/token', json={'token': 'sk-one-more'})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('最多', r.json()['detail'])
+
+    def test_删掉不用验token(self):
+        r"""删一个已经不能用的 token 时，不该因为「验不过」而删不掉。"""
+        self.store.add_token('sk-dead')
+        srv.mineru_api.check_token = lambda t, **k: (False, 'token 不对')
+        r = client.post('/api/token', json={'token': '', 'slot': 0})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.store.all_tokens(), [])
+
+    def test_验不过就不存(self):
+        r"""🔴 不验的话，用户要等到转第一份失败才知道填错了 —— 而那时候
+        文件已经传上去了。验一次不消耗解析额度，没有理由不验。"""
+        srv.mineru_api.check_token = lambda t, **k: (False, 'token 不对')
+        r = client.post('/api/token', json={'token': 'sk-bad'})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('不对', r.json()['detail'])
+        self.assertEqual(self.store.all_tokens(), [])
+
+    def test_验不过时原来那些一个都不能动(self):
+        r"""🔴 换 token 换错了，不该把原来能用的那个也搭进去。"""
+        self.store.add_token('sk-good-old-one')
+        srv.mineru_api.check_token = lambda t, **k: (False, 'token 不对')
+        client.post('/api/token', json={'token': 'sk-bad', 'slot': 0})
+        self.assertEqual(self.store.all_tokens(), ['sk-good-old-one'])
+
+    def test_回复里只有打码版(self):
+        r"""🔴 原文不出后端，接口回复也算「出去」。"""
+        r = client.post('/api/token', json={'token': 'sk-1234567890abcdefgh'})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotIn('1234567890', json.dumps(r.json()))
+        self.assertIn('...', r.json()['masked'])
+
+    def test_env给出每一个的状态但不给原文(self):
+        self.store.add_token('sk-abcdefghijklmnopqrst')
         d = client.get('/api/env').json()
-        self.assertEqual(len(d['tokens']['list']), 2)
-        self.assertTrue(d['tokens']['list'][0]['has'])
+        self.assertEqual(d['tokens']['count'], 1)
+        self.assertEqual(len(d['tokens']['list']), 1)
+        self.assertIn('...', d['tokens']['list'][0]['masked'])
         self.assertNotIn('sk-abcdefghijklmnopqrst', json.dumps(d))
+
+    def test_没有栏数这个概念了(self):
+        r"""🔴 POST /api/slots 连同「栏数」整个删了。留一个没人调的接口
+        就是这项目一直在防的形状。"""
+        self.assertEqual(client.post('/api/slots', json={'slots': 3}).status_code,
+                         404)
+        self.assertFalse(hasattr(self.store, 'set_slot_count'))
+        self.assertFalse(hasattr(self.store, 'slot_count'))
+
 
 
 class Test双队列(unittest.TestCase):

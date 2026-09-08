@@ -30,15 +30,19 @@ TOKEN_FILE = os.path.join(paths.LOGS, 'token.json')
 USAGE_FILE = os.path.join(paths.LOGS, 'usage.json')
 RUNS_FILE = os.path.join(paths.LOGS, 'runs.json')
 
-# 能存几个 token —— **用户自己在设置里定，1 到 10 个**（作者 2026-09-08 定）。
+# 能存几个 token —— **不设固定栏数**（作者 2026-09-08 改定）。
 #
 # 为什么要多个：mineru 一个手机号注册一个号、微信再注册一个，号与号之间
 # 额度独立。攒几个号，每天可用的页数就翻几倍。
 #
-# 上限 10 是拍的，不是技术限制 —— 再多这个设置页就没法看了，而且真需要
-# 十几个号的量级早该去买官方套餐，不该靠攒小号。
-DEFAULT_SLOTS = 2
-MAX_SLOTS = 10
+# 原来是「先在设置里选几栏、再往栏里填」，多一层概念，还会冒出「空栏」
+# 这种既不算有 token 也不算没有的中间态。现在**栏数就是 token 数**：
+# 界面上一个「+ 添加」，每一栏自己带「换」和「删」。
+#
+# 🔴 `MAX_TOKENS` 不是功能限制，是**防手滑的天花板**。每个 token 都得去
+#    mineru 注册一个账号，正常人不会有 50 个；留这个数是万一哪天代码出
+#    bug 往里塞，不至于把 token.json 撑爆、把设置页卡死。
+MAX_TOKENS = 50
 
 # 一个号一天有多少页「最高优先级」额度。
 #
@@ -83,96 +87,80 @@ def _raw():
 
 
 def all_tokens():
-    r"""文件里存着的**全部** token，不按当前槽位数截断。
+    r"""存着的全部 token，按界面上的先后顺序。**不含空串。**
 
-    调小槽位数时多出来的那几个就藏在这儿 —— 见 `set_slot_count`。
-    查重必须用这个而不是 `token_slots()`，理由见那边。
+    兼容两种老格式，都不做迁移写回（下次增删改时自然就写成新格式了，
+    没必要为了改格式去动用户的凭据文件）：
+
+        {"token": "sk-x"}                     最早，只能存一个
+        {"slots": 3, "tokens": ["a","","c"]}  中间那版，有固定栏数和空栏
+
+    中间那版的空栏在这里被滤掉 —— 现在没有「空栏」这个概念了。
     """
     d = _raw()
     raw = d.get('tokens')
     if not isinstance(raw, list):
-        raw = [d.get('token') or '']          # 老格式
-    return [(x or '').strip() if isinstance(x, str) else '' for x in raw]
+        raw = [d.get('token') or '']          # 最早那版
+    out = [(x or '').strip() if isinstance(x, str) else '' for x in raw]
+    return [t for t in out if t]
 
 
-def slot_count():
-    r"""现在开着几个槽。范围 1~`MAX_SLOTS`，没设过就是 `DEFAULT_SLOTS`。
-
-    存坏了（有人手改了文件、写了 0 或者 "abc"）一律回落到默认值，
-    **不抛异常** —— 设置文件坏掉不该让整个软件打不开。
-    """
-    try:
-        n = int(_raw().get('slots') or DEFAULT_SLOTS)
-    except Exception:
-        return DEFAULT_SLOTS
-    return max(1, min(n, MAX_SLOTS))
-
-
-def set_slot_count(n):
-    r"""改槽位数。
-
-    🔴 **调小不会丢 token。** 多出来的原样留在文件里，只是不显示、也不
-       参与调度；调回去又出现。
-
-       为什么这么设计：本来打算调小就截断，那就必须在界面上弹一句
-       「这会删掉第 3、4 个 token，确定吗」。用户填 token 是件麻烦事
-       （要去网站复制），为了省一次误删，多存几行字算便宜的。
-    """
-    try:
-        n = int(n)
-    except Exception:
-        return False
-    n = max(1, min(n, MAX_SLOTS))
-
-    # 🔴 **填过的一律往前排，空栏留在后面。**
-    #
-    #    不这么做会出一件很吓人的事：用户第 1 栏空着、token 填在第 2 栏，
-    #    他把栏数调到 1 —— 前 1 栏正好是那个空的，`usable_tokens()` 当场
-    #    变空，软件退回「还没填 token」那一屏。token 其实还在文件里，
-    #    但用户看到的就是「我的 token 没了」。
-    #
-    #    紧凑排列之后，减栏只会挤掉**多出来的**号，不会挤掉唯一那个。
-    filled = [t for t in all_tokens() if t]
-    keep = filled + [''] * max(0, n - len(filled))
-    return _write(TOKEN_FILE, {'slots': n, 'tokens': keep})
-
-
-def token_slots():
-    r"""每个槽的原文，长度等于 `slot_count()`，没填的位置是空串。
-
-    **兼容老格式**：早先存的是 `{"token": "sk-x"}`（只有一个），
-    读到那种就当成 0 号槽。不做迁移写回 —— 用户下次改任何一个槽时
-    自然就写成新格式了，没必要为了改个格式去动他的凭据文件。
-    """
-    n = slot_count()
-    out = all_tokens()
-    return (out + [''] * n)[:n]
+def token_count():
+    """现在有几个 token。"""
+    return len(all_tokens())
 
 
 def usable_tokens():
-    """去掉空槽，按槽位顺序返回。一个都没填就是空列表。"""
-    return [t for t in token_slots() if t]
+    """能用来转换的那些。现在等同于 `all_tokens()`（不存空串了）。
 
-
-def set_token_slot(i, tok):
-    r"""写第 i 个槽。传空串等于清掉这一个（别的槽不动）。
-
-    🔴 写回时带上**藏起来的那些**（槽位数调小时留下的），
-       否则填一次 token 就把它们抹了。
+    名字留着 —— 调度那边一直调的是这个，改名要动好几处，
+    而这个名字本身说的就是它的用途。
     """
-    n = slot_count()
-    if not (0 <= i < n):
-        return False
-    all_ = all_tokens()
-    all_ = all_ + [''] * max(0, n - len(all_))
-    all_[i] = (tok or '').strip()
-    if not any(all_):
+    return all_tokens()
+
+
+def _save_tokens(rows):
+    """落盘。一个都不剩就把文件删掉，别留个空壳。"""
+    rows = [t for t in rows if t]
+    if not rows:
         try:
             os.remove(TOKEN_FILE)
         except OSError:
             pass
         return True
-    return _write(TOKEN_FILE, {'slots': n, 'tokens': all_})
+    return _write(TOKEN_FILE, {'tokens': rows})
+
+
+def add_token(tok):
+    """在末尾添一个。返回 (成功, 说明)。"""
+    tok = (tok or '').strip()
+    if not tok:
+        return False, '没填内容'
+    rows = all_tokens()
+    if tok in rows:
+        return False, '这个 token 已经是第 %d 个了' % (rows.index(tok) + 1)
+    if len(rows) >= MAX_TOKENS:
+        return False, '最多 %d 个' % MAX_TOKENS
+    rows.append(tok)
+    return _save_tokens(rows), ''
+
+
+def set_token_slot(i, tok):
+    """换掉第 i 个。传空串等于**删掉这一个**，后面的往前挪。"""
+    rows = all_tokens()
+    if not (0 <= i < len(rows)):
+        return False
+    tok = (tok or '').strip()
+    if not tok:
+        del rows[i]
+    else:
+        rows[i] = tok
+    return _save_tokens(rows)
+
+
+def remove_token(i):
+    """删掉第 i 个。"""
+    return set_token_slot(i, '')
 
 
 def get_token():
@@ -185,8 +173,9 @@ def get_token():
 
 
 def set_token(tok):
-    """写 0 号槽。老调用点和测试还在用。"""
-    return set_token_slot(0, tok)
+    """只留这一个 token（有几个删几个）。老调用点和测试还在用。"""
+    tok = (tok or '').strip()
+    return _save_tokens([tok] if tok else [])
 
 
 def masked(tok=None):

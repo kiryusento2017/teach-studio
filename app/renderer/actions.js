@@ -247,6 +247,15 @@
       refreshEnv();          // 进来时刷一次，用量才是新的
     },
 
+    // 点「+ 添加」：开一行空的输入框。保存时 slot 传 -1 = 添一个新的。
+    addSlot: function () {
+      st.editSlot = 'new';
+      st.err = '';
+      render();
+      var box = document.getElementById('tokenbox');
+      if (box) box.focus();
+    },
+
     editSlot: function (arg) {
       st.editSlot = slotNo(arg);
       st.err = '';
@@ -262,11 +271,14 @@
     },
 
     saveSlot: function (arg) {
-      if (st.tokenBusy || st.editSlot < 0) return;
+      if (st.tokenBusy) return;
+      // 'new' = 添一个；数字 = 改第几个；-1 = 根本没在编辑
+      var adding = (st.editSlot === 'new');
+      if (!adding && !(st.editSlot >= 0)) return;
       var box = document.getElementById('tokenbox');
       // arg 是回车提交时带进来的输入框内容；点按钮时 arg 是 data-arg（空）
       var v = (arg && arg.length > 4) ? arg : (box ? box.value : '');
-      var slot = st.editSlot;
+      var slot = adding ? -1 : st.editSlot;
       st.tokenBusy = true;
       st.err = '';
       render();
@@ -292,15 +304,10 @@
         });
     },
 
-    // 下拉框改「几个 token 栏」时由 app.js 的 change 监听调过来
-    setSlotCount: function (n) {
-      HTTP.post('/api/slots', { slots: n })
-        .then(refreshEnv)
-        .catch(function (e) {
-          st.err = String(e && e.message || e);
-          render();
-        });
-    },
+    // 🔴 这里曾经有个 setSlotCount，配合设置页那个「几个 token 栏」的
+    //    下拉框。2026-09-08 改成「+ 添加 / 删」之后，「栏数」这个概念
+    //    整个没了 —— 栏数就是 token 数，不需要单独设。接口
+    //    POST /api/slots 也一并删了。
 
     // ── 检查更新 ─────────────────────────────────────────────────────
     checkUpdate: function () {
@@ -366,6 +373,16 @@
         st.taskId = d.task_id;
         st.task = { state: 'running', current: 0, total: d.total,
                     now: '', lines: [], results: [] };
+        // 🔴 **交出去的从待选清单里拿掉** —— 它们已经在队列里了。
+        //    不拿掉的话，转换中的列表下面会再原样列一遍同一批文件
+        //    （2026-09-08 作者报的：扔 4 个进去点开始，下面又冒出
+        //    一模一样的 4 个）。以前不显示待选清单所以看不出来，
+        //    加了「转换中也能继续加文件」之后就露出来了。
+        //    appendQueue 那边一直是这么做的，这里漏了。
+        var gone = {};
+        paths.forEach(function (p) { gone[p] = true; });
+        st.items = st.items.filter(function (x) { return !gone[x.path]; });
+        paths.forEach(function (p) { delete st.picked[p]; });
         render();
         startPolling();
       }).catch(function (e) {

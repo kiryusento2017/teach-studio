@@ -107,28 +107,25 @@
   // ── 设置页 ───────────────────────────────────────────────────────────
   var TOKEN_URL = 'https://mineru.net/apiManage/token';
 
-  function slotRow(x, i, st) {
-    var no = '第 ' + (i + 1) + ' 个';
-    if (st.editSlot === i) {
-      return '<div class="it">'
-        + '<span class="f-dim" style="flex:none;width:52px">' + no + '</span>'
-        + '<input id="tokenbox" type="text" spellcheck="false" '
-        + 'placeholder="粘贴 token，按回车保存" '
-        + 'style="flex:1;padding:4px 6px;font-family:Consolas,monospace">'
-        + btn('saveSlot', st.tokenBusy ? '正在验…' : '保存',
-              { cls: 'primary', off: st.tokenBusy })
-        + btn('cancelSlot', '取消', { off: st.tokenBusy })
-        + '</div>';
-    }
-    if (!x.has) {
-      return '<div class="it">'
-        + '<span class="f-dim" style="flex:none;width:52px">' + no + '</span>'
-        + '<span class="grow f-dim">还没填</span>'
-        + link('editSlot', '填这个', String(i)) + '</div>';
-    }
+  // 一行输入框。改某一个和添一个新的共用这一行 —— 只是标题不同。
+  function tokenEditRow(st, label) {
+    return '<div class="it">'
+      + '<span class="f-dim" style="flex:none;width:52px">' + esc(label) + '</span>'
+      + '<input id="tokenbox" type="text" spellcheck="false" '
+      + 'placeholder="粘贴 token，按回车保存" '
+      + 'style="flex:1;padding:4px 6px;font-family:Consolas,monospace">'
+      + btn('saveSlot', st.tokenBusy ? '正在验…' : '保存',
+            { cls: 'primary', off: st.tokenBusy })
+      + btn('cancelSlot', '取消', { off: st.tokenBusy })
+      + '</div>';
+  }
+
+  function tokenRow(x, i, st) {
+    if (st.editSlot === i) return tokenEditRow(st, '第 ' + (i + 1) + ' 个');
     return '<div class="it">'
       + dot(C.ok)
-      + '<span class="f-dim" style="flex:none;width:44px">' + no + '</span>'
+      + '<span class="f-dim" style="flex:none;width:44px">'
+      + (i + 1) + '</span>'
       + '<span class="grow ell" style="font-family:Consolas,monospace">'
       + esc(x.masked) + '</span>'
       + '<span class="rt">今天用了 ' + (x.used || 0) + ' 页</span>'
@@ -136,16 +133,7 @@
       + link('clearSlot', '删', String(i)) + '</div>';
   }
 
-  function slotPicker(cur, max) {
-    var o = '';
-    for (var i = 1; i <= max; i++) {
-      o += '<option value="' + i + '"' + (i === cur ? ' selected' : '')
-        + '>' + i + '</option>';
-    }
-    return '<select data-slots style="padding:3px 6px">' + o + '</select>';
-  }
-
-  function guideText(n) {
+  function guideText() {
     return ['想要更多额度就多注册几个号 —— 一个手机号能注册一个账号，微信也能',
             '单独注册一个，每个号的每日额度分开算。',
             '',
@@ -153,7 +141,7 @@
             '   （点右上角「复制地址」，再粘到浏览器里）',
             '2. 用手机号注册登录，在这个页面创建一个 API token，复制出来',
             '3. 退出登录，改用微信注册第二个号，同样创建一个 token',
-            '4. 把它们分别填进上面的 ' + n + ' 个栏位',
+            '4. 回到这里点「+ 添加」，一个一个粘进去',
             '',
             '转换的时候软件自动挑「今天用得最少」的那个号；某个号额度到顶了，',
             '会自动换下一个接着转，不用你管。',
@@ -285,20 +273,27 @@
 
   function settingsPage(st) {
     var e = st.env || {};
-    var tk = e.tokens || { slots: 1, max_slots: 10, list: [] };
+    var tk = e.tokens || { count: 0, max: 50, list: [] };
     var list = tk.list || [];
-    var n = tk.slots || list.length || 1;
+    var n = list.length;
+    var full = n >= (tk.max || 50);
+    var adding = (st.editSlot === 'new');
 
     var body = '<div class="it">'
-      + '<span class="grow">token 栏数量</span>'
-      + slotPicker(n, tk.max_slots || 10)
-      + '<span class="f-dim" style="margin-left:8px">最多 '
-      + (tk.max_slots || 10) + ' 个</span></div>'
-      + list.map(function (x, i) { return slotRow(x, i, st); }).join('')
+      + '<span class="grow">token（' + n + ' 个）</span>'
+      + (full
+          ? '<span class="f-dim">已经 ' + n + ' 个了</span>'
+          : btn('addSlot', '+ 添加', { off: adding }))
+      + '</div>'
+      + (n
+          ? list.map(function (x, i) { return tokenRow(x, i, st); }).join('')
+          : (adding ? '' : '<div class="it"><span class="grow f-dim">'
+                           + '一个都还没有，点右上角「+ 添加」</span></div>'))
+      + (adding ? tokenEditRow(st, '新的') : '')
       + '<div class="it"><span class="grow f-dim">注册指南</span>'
       + link('copyTokenUrl', st.copied ? '已复制' : '复制地址') + '</div>'
       + '<div class="log" data-keep-scroll="guide"><span class="l">'
-      + esc(guideText(n)).split(chr10()).join('</span><span class="l">')
+      + esc(guideText()).split(chr10()).join('</span><span class="l">')
       + '</span></div>'
       + updateBlock(st);
 
@@ -496,7 +491,7 @@
       });
       var pg = sel.reduce(function (a, x) { return a + (x.pages || 0); }, 0);
       var tks = (st.env && st.env.tokens) || { list: [] };
-      var nTok = (tks.list || []).filter(function (x) { return x.has; }).length;
+      var nTok = tks.count || (tks.list || []).length;
       var usedAll = (tks.list || []).reduce(function (a, x) {
         return a + (x.used || 0);
       }, 0);

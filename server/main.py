@@ -85,15 +85,14 @@ def env():
         'node': {'ok': bool(node_ok)},
         'pandoc': {'ok': todocx.pandoc_available()},
         'token': {'ok': bool(tok), 'masked': store.masked(tok)},
-        # 每个槽的状态。**只给打码版和用量**，原文永远不出后端。
+        # 每个 token 的状态。**只给打码版和用量**，原文永远不出后端。
         'tokens': {
-            'slots': store.slot_count(),
-            'max_slots': store.MAX_SLOTS,
+            'count': store.token_count(),
+            'max': store.MAX_TOKENS,
             'daily_pages': store.DAILY_PAGES,
-            'list': [{'has': bool(t),
-                      'masked': store.masked(t) if t else '',
-                      'used': store.used_today(t) if t else 0}
-                     for t in store.token_slots()],
+            'list': [{'masked': store.masked(t),
+                      'used': store.used_today(t)}
+                     for t in store.all_tokens()],
         },
         'writable': os.access(ROOT, os.W_OK),
     }
@@ -103,11 +102,9 @@ def env():
 
 class TokenReq(BaseModel):
     token: str = ''
-    slot: int = 0
-
-
-class SlotsReq(BaseModel):
-    slots: int = 2
+    # 改第几个（从 0 数）。**-1 = 添加一个新的**，这是默认值 ——
+    # 想不带 slot 就调用的话，语义是「加一个」，而不是「改第一个」。
+    slot: int = -1
 
 
 # 🔴 **这里本来还有一个 `GET /api/token`。删了。**
@@ -129,54 +126,51 @@ def token_set(req: TokenReq):
     验的办法不消耗解析额度（拿一个不存在的 task_id 去查，看是 401 还是
     「任务不存在」），所以可以当场验，不用等用户转第一份才发现填错了。
     """
-    i = int(req.slot or 0)
-    if not (0 <= i < store.slot_count()):
-        return JSONResponse({'detail': '没有第 %d 个 token 栏' % (i + 1)},
-                            status_code=400)
+    i = int(req.slot)
     tok = (req.token or '').strip()
+    n = store.token_count()
+
+    # ── 删掉一个 ──────────────────────────────────────────────────────
     if not tok:
-        store.set_token_slot(i, '')
-        return {'ok': True, 'slot': i, 'masked': '', 'has': False}
+        if not (0 <= i < n):
+            return JSONResponse({'detail': '没有第 %d 个 token' % (i + 1)},
+                                status_code=400)
+        store.remove_token(i)
+        return {'ok': True, 'count': store.token_count()}
 
-    # 🔴 **同一个 token 不许填两遍。** 填重了两个栏其实是一个号，
+    # ── 换掉一个 / 添一个 ─────────────────────────────────────────────
+    adding = (i < 0)
+    if not adding and not (0 <= i < n):
+        return JSONResponse({'detail': '没有第 %d 个 token' % (i + 1)},
+                            status_code=400)
+
+    # 🔴 **同一个 token 不许存两遍。** 存重了两条其实是一个号，
     #    调度会以为有双倍额度，撞墙撞两次才发现。
-    #
-    #    查的是 `all_tokens()` 而不是看得见的那几栏 —— 栏数调小时多出来的
-    #    号是藏起来不是删掉的，只查可见栏的话，用户能把藏着的那个又填一遍，
-    #    等他把栏数调回去就成了两个一模一样的号。
-    n_vis = store.slot_count()
     for j, other in enumerate(store.all_tokens()):
-        if j != i and other and other == tok:
-            if j < n_vis:
-                why = '这个 token 已经填在第 %d 栏了' % (j + 1)
-            else:
-                why = ('这个 token 之前填过，在第 %d 栏 —— 现在栏数是 %d，'
-                       '它被暂时收起来了。把栏数调到 %d 就能看见。'
-                       % (j + 1, n_vis, j + 1))
-            return JSONResponse({'detail': why}, status_code=400)
+        if j != i and other == tok:
+            return JSONResponse(
+                {'detail': '这个 token 已经是第 %d 个了' % (j + 1)},
+                status_code=400)
 
+    if adding and n >= store.MAX_TOKENS:
+        return JSONResponse({'detail': '最多 %d 个' % store.MAX_TOKENS},
+                            status_code=400)
+
+    # 🔴 **存之前先验一次** —— 验不过不存，免得转到一半才发现填错了。
+    #    验的办法不消耗解析额度（拿一个不存在的 task_id 去查，
+    #    看是 401 还是「任务不存在」）。
     good, why = mineru_api.check_token(tok)
     if not good:
         return JSONResponse({'detail': why}, status_code=400)
-    store.set_token_slot(i, tok)
-    return {'ok': True, 'slot': i, 'masked': store.masked(tok), 'has': True}
 
-
-@app.post('/api/slots')
-def slots_set(req: SlotsReq):
-    r"""改 token 栏的数量（1~10）。
-
-    调小**不丢** token —— 多出来的留在文件里不显示，调回去又出现
-    （见 `store.set_slot_count`），所以前端不用弹确认。
-    """
-    n = int(req.slots or 0)
-    if not (1 <= n <= store.MAX_SLOTS):
-        return JSONResponse({'detail': 'token 栏只能是 1 到 %d 个' % store.MAX_SLOTS},
-                            status_code=400)
-    if _busy():
-        return JSONResponse({'detail': '还有一批在转，转完再改'}, status_code=409)
-    store.set_slot_count(n)
-    return {'ok': True, 'slots': store.slot_count()}
+    if adding:
+        ok, why2 = store.add_token(tok)
+        if not ok:
+            return JSONResponse({'detail': why2}, status_code=400)
+    else:
+        store.set_token_slot(i, tok)
+    return {'ok': True, 'count': store.token_count(),
+            'masked': store.masked(tok)}
 
 
 # ── 体检 ───────────────────────────────────────────────────────────────
