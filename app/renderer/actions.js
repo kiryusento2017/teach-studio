@@ -12,6 +12,8 @@
   // 申请 token 的页面。**只此一处**，pages.js 里显示用的那个常量也指同一个
   // 地址 —— 两处写死同一个 URL 迟早改漏一个。
   var TOKEN_URL = 'https://mineru.net/apiManage/token';
+  // ⚠️ 这两个常量 pages.js 里也各有一份（那边渲染要用）。改一处记得改两处。
+  var RELEASE_URL = 'https://github.com/kiryusento2017/teach-studio/releases';
 
   function slotNo(arg) {
     var i = parseInt(arg, 10);
@@ -87,9 +89,12 @@
   //    一份文件转三分钟，中间那个 JSON 一个字节都不变 —— 一百八十轮里
   //    有一百七十多轮可以完全不碰 DOM。
   //
-  //    ⚠️ 这**不是根治**。真要根治得把整页重绘改成局部更新，那是动骨架。
-  //    这里只是把「每秒撞你一次」变成「整个转换过程撞三五次」。
+  //    ⚠️ 这原先「不是根治」—— 2026-09-09 把局部更新补上了：结构没变时
+  //    只改两处 textContent（patchConv），整页 innerHTML 不动。
+  //    现在的三道闸依次是：签名没变 → 不动；当前屏不显示任务 → 不动；
+  //    结构没变 → 只 patch 文字。都过不去才整页重画。
   var lastSig = '';
+  var lastStruct = '';
 
   // 🔴 **签名要把「每秒都在变、但界面上根本不显示」的字段剔掉。**
   //
@@ -120,12 +125,44 @@
         o[k] = d[k];
       }
     }
+    // 🔴 **lines 只有最后一行会显示**（当前那行的右侧），日志屏开着时才要全部。
+    //    不这么掐的话，后端每吐一行日志签名就变一次 —— 界面上明明只多了
+    //    半句话，却整页 innerHTML 重来，滚动惯性当场断。
+    if (!st.showLog && o.lines) {
+      o.lines = (d.lines || []).slice(-1)[0] || '';
+    }
     return JSON.stringify(o);
+  }
+
+  // 结构签名：**换了一份、多了一条结果、状态变了**才算结构变。
+  // 这几样一变必须整页重画（行数、顺序、按钮都跟着变）；只是那句状态文字
+  // 变了的话，patchConv 改两个 textContent 就够。
+  function structSig(d) {
+    if (!d) return '';
+    return [d.state, d.current, d.total,
+            (d.results || []).length,
+            (st.pending || []).length].join('|');
+  }
+
+  // 🔴 **抓手不在就什么都不做。** 找不到这两个元素说明当前屏根本不显示
+  //    任务状态（在历史页 / 设置页 / 关于页 / 报告屏 / 日志屏），
+  //    那就没什么可 patch 的，也不该整页重画去打断用户。
+  //    返回 true = 已经处理完，调用方不用再 render。
+  function patchConv(d) {
+    var nowEl = document.getElementById('convnow');
+    if (!nowEl) return false;
+    nowEl.textContent = d.now || '准备中…';
+    var lineEl = document.getElementById('convline');
+    if (lineEl) {
+      lineEl.textContent = (d.lines || []).slice(-1)[0] || '正在处理…';
+    }
+    return true;
   }
 
   function stopPolling() {
     if (poller) { clearInterval(poller); poller = null; }
     lastSig = '';
+    lastStruct = '';
   }
 
   function poll() {
@@ -161,6 +198,17 @@
       var sig = convSig(d);
       if (sig === lastSig) return;
       lastSig = sig;
+
+      // 当前屏不显示任务状态（历史 / 设置 / 关于）就别画 —— st.task 已经
+      // 更新过了，用户切回主屏时 backMain 会画一次，看到的是最新的。
+      // 不挡的话在历史页翻记录时每秒被重绘一次，滚动条一直往回跳。
+      if (st.page !== 'main') return;
+
+      // 结构没变（还在转同一份）→ 只改那两处文字，整页不动。
+      // 日志屏开着时 lines 要整段重排，patchConv 抓不到 convnow，
+      // 自然会 falseback 到整页 render（有 data-keep-scroll 兜着滚动位置）。
+      if (structSig(d) === lastStruct && patchConv(d)) return;
+      lastStruct = structSig(d);
       render();
     }).catch(function (e) {
       // 🔴 **任务不在了就别再问。** 后端的任务表有上限，老 id 会被挤掉；
@@ -185,12 +233,20 @@
 
   function addPaths(paths) {
     // 正在转的时候拖进来的，走待办 —— 不打断这一批。
-    if (window.P2W_ISRUNNING(st) || st.task) { addPending(paths); return; }
+    //
+    // 🔴 判据是 `starting`（请求已发、task 还没回来的那段窗口），**不是
+    //    `st.task`**。转完之后 st.task 还留着 done 快照，拿它判会把
+    //    「在结果屏上再拖一份进来」也算成忙 —— 于是进待办、体检回来发现
+    //    这批已经 done、自动晋升、**不问一句直接开转**，白花 MinerU 额度。
+    //    反过来漏掉 starting 也不行：那一刻 task 还是 null，文件会被当成
+    //    新的一批塞进 items，可这批的 paths 早发出去了，那几份永远显示
+    //    「未处理」。两个洞都堵在这一行。
+    if (window.P2W_ISRUNNING(st) || st.starting) { addPending(paths); return; }
     if (!paths || !paths.length) { render(); return; }
     st.scanning = true;
     st.err = '';
     render();
-    HTTP.post('/api/scan', { paths: paths }).then(function (d) {
+    HTTP.post('/api/scan', { paths: paths }, HTTP.SCAN_TIMEOUT).then(function (d) {
       var seen = {};
       st.items.forEach(function (x) { seen[x.path] = true; });
       (d.items || []).forEach(function (x) {
@@ -200,6 +256,11 @@
           if (x.ok) st.picked[x.path] = true;
         }
       });
+      // 🔴 拖进来一个不含 PDF 的文件夹时要说话。不说的话界面一个字不变，
+      //    用户不知道是软件没反应还是里面真没有东西。
+      //    ⚠️ 判据跟本地版一样是「整个清单为空」—— 清单里已经有文件时
+      //    再拖一个空文件夹进来仍然不吭声。两边同病，先保持一致。
+      if (!st.items.length) st.err = '这里面没有找到 PDF';
       st.scanning = false;
       render();
     }).catch(function (e) {
@@ -219,7 +280,7 @@
     st.pendingBusy = true;
     st.err = '';
     render();
-    HTTP.post('/api/scan', { paths: paths }).then(function (d) {
+    HTTP.post('/api/scan', { paths: paths }, HTTP.SCAN_TIMEOUT).then(function (d) {
       // 🔴 **去重要比两样**：待办里已有的、**正在转的这批**。
       //    用户很可能把已经在转的某份又拖一次，那份转出来会覆盖同一个
       //    .docx，白花一次额度。
@@ -302,6 +363,27 @@
 
     pickDir: function () {
       window.api.pickDir().then(function (d) { if (d) addPaths([d]); });
+    },
+
+    // ── 选择 ───────────────────────────────────────────────────────────
+    //
+    // 🔴 **picked 是三态**：`true` / `false` / 键根本不存在。
+    //    判「选中了吗」一律用 `!== false` —— 没出现过的键视为选中，
+    //    这样拖进来的文件默认全勾，用户直接点「开始转换」就行，
+    //    不用先一个个勾一遍。
+    toggle: function (path) {
+      st.picked[path] = st.picked[path] === false;
+      render();
+    },
+
+    selAll: function () {
+      st.items.forEach(function (x) { if (x.ok) st.picked[x.path] = true; });
+      render();
+    },
+
+    selNone: function () {
+      st.items.forEach(function (x) { st.picked[x.path] = false; });
+      render();
     },
 
     clearAll: function () {
@@ -453,11 +535,27 @@
       render();
     },
 
+    // 跨大版本要重下整包时的出路。**云端不弹浏览器**，所以给的是
+    // 「复制地址」而不是「去下载页」—— 用户自己粘到浏览器，百分百可控。
+    copyReleaseUrl: function () {
+      window.api.copyText(RELEASE_URL);
+      st.copied = true;
+      render();
+    },
+
+    // 更新是独立一屏，从设置页进。进来顺手清掉上一次的复制标记。
+    openUpdate: function () {
+      st.page = 'update';
+      st.copied = false;
+      st.err = '';
+      render();
+    },
+
     // ── 转换 ─────────────────────────────────────────────────────────
     start: function () {
       if (st.starting || window.P2W_ISRUNNING(st)) return;
       var paths = st.items.filter(function (x) {
-        return x.ok && st.picked[x.path];
+        return x.ok && st.picked[x.path] !== false;
       }).map(function (x) { return x.path; });
       if (!paths.length) return;
       st.starting = true;
@@ -515,20 +613,62 @@
     //    用户硬盘里。留着的话点完「再转一批」还看见一堆旧文件，
     //    用户会以为没清干净。（lastResults 是给「待办晋升」那条路用的，
     //    手动开新一批不走那儿。）
+    // 🔴 **不清列表 —— 把失败的留下来勾上，等于一键重试。**
+    //    原先是整个清空，用户想重转失败的那几份得重新拖一遍。
     newBatch: function () {
+      var failed = {};
+      var ran = {};
+      ((st.task && st.task.results) || []).forEach(function (r) {
+        ran[r.pdf] = true;
+        if (!r.ok) failed[r.pdf] = true;
+      });
+
+      // 🔴 **只重设这一批真转过的那些。** st.items 里可能混着根本没转过的
+      //    文件：摁停止时并回来的待办、晋升时 start() 失败留下的那批。
+      //    它们在 results 里没有记录，一律重设的话会被取消勾选 ——
+      //    用户看到的是「软件把我刚拖进来的东西吃了」。
+      st.items.forEach(function (x) {
+        if (ran[x.path]) st.picked[x.path] = !!failed[x.path];
+      });
+
       st.task = null;
       st.taskId = '';
-      st.items = [];
-      st.picked = {};
       st.showReport = false;
-      st.showLastReport = false;
+      // 🔴 手动开新一批 = 不再关心上一批。不清的话 lastResults 会隔着一批
+      //    串味：A 晋升 B（lastResults 记的是 A）→ B 转完没有待办 →
+      //    点「再转一批」手动转 C → C 运行中点「上一批的报告」看到的是 A。
+      //    报告是拿去核对 Word 的清单，指错批次等于指错文件。
       st.lastResults = null;
+      st.showLastReport = false;
       st.err = '';
+      stopPolling();
+      render();
+    },
+
+    // 🔴 **日志和报告互斥**：它们抢的是同一块内容区，两个都开的话
+    //    后判断的那个会把前一个盖掉，用户点了没反应。
+    toggleLog: function () {
+      st.showLog = !st.showLog;
+      if (st.showLog) st.showReport = false;
       render();
     },
 
     toggleReport: function () {
       st.showReport = !st.showReport;
+      if (st.showReport) st.showLog = false;
+      // copied 是设置页「复制地址」和报告页「复制」共用的一个标志，
+      // 进出报告页时清掉，免得刚从设置页复制过地址、一进来就写着「已复制」。
+      st.copied = false;
+      render();
+    },
+
+    // 🔴 **走主进程剪贴板，不用 navigator.clipboard。** 页面是 file:// 加载的，
+    //    浏览器的剪贴板 API 在那个来源下用不了（设置页的「复制地址」同理）。
+    copyReport: function () {
+      var text = st.reportText || '';
+      if (!text) return;
+      window.api.copyText(text);
+      st.copied = true;
       render();
     },
 
@@ -551,9 +691,26 @@
       render();
     },
 
+    // 关于页。版本号来自 st.env.version，进来刷一次 —— 刚更新完回来
+    // 看到的还是旧版本号的话，会让人以为更新没生效。
+    openAbout: function () {
+      st.page = 'about';
+      st.err = '';
+      render();
+      refreshEnv();
+    },
+
     dismissErr: function () {
       st.err = '';
       render();
     },
+
+    // ── 拦截屏和「连不上后台」的两个出口 ────────────────────────────
+    //
+    // 都是浏览器自带的，不经过主进程 —— 少一条 IPC 通道就少一处能坏的地方。
+    // reload 会把整个页面重新加载一遍，等于重走开机自检（getPort → /api/env），
+    // 正是「我把文件夹挪好了，你再看看」要的效果。
+    reload: function () { window.location.reload(); },
+    quit: function () { window.close(); },
   };
 })();

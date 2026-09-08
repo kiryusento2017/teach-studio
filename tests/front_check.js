@@ -133,6 +133,7 @@ ck('装在不可写目录要拦', () => {
 console.log('\ntoken：');
 
 const settings = sb.window.P2W_PAGES.settings;
+const upd = sb.window.P2W_PAGES.update;
 
 ck('没 token 时拦一屏，并把人送去设置页', () => {
   const st = ready(sb);
@@ -231,19 +232,39 @@ ck('正在验的时候保存按钮变灰，不给连点', () => {
   st.tokenBusy = false;
 });
 
-ck('设置页有检查更新，并显示当前版本', () => {
+ck('设置页给更新入口和当前版本，正文在独立一屏', () => {
+  // 🔴 更新的每个分支都要用户拿主意（装不装、验不过还装不装、失败怎么办），
+  //    一行字加一个小按钮撑不起这件事 —— 正文搬到独立整屏，设置页只留入口。
   const st = ready(sb);
   st.env.version = 'v0.1.0';
   const h = settings(st);
+  if (!h.includes('data-act="openUpdate"')) throw new Error('没有更新入口');
+  if (!h.includes('v0.1.0')) throw new Error('没显示当前版本');
+});
+
+ck('更新页没查过时给「检查更新」和当前版本', () => {
+  const st = ready(sb);
+  st.env.version = 'v0.1.0';
+  const h = upd(st);
   if (!h.includes('data-act="checkUpdate"')) throw new Error('没有检查更新');
   if (!h.includes('v0.1.0')) throw new Error('没显示当前版本');
+  if (!h.includes('font-size:14px;font-weight:600')) {
+    throw new Error('没有大标题，又压回一行去了');
+  }
+});
+
+ck('设置页有新版本时把它标出来', () => {
+  const st = ready(sb);
+  st.upd = { has_update: true, latest: 'v0.2.0', lines: [] };
+  const h = settings(st);
+  if (!h.includes('有新版本 v0.2.0')) throw new Error('设置页没提示有新版本');
 });
 
 ck('查到新版本给版本号和「立即更新」', () => {
   const st = ready(sb);
   st.upd = { has_update: true, latest: 'v0.2.0', published: '2026-09-09T00:00:00Z',
              notes_brief: '修了两个问题', lines: [] };
-  const h = settings(st);
+  const h = upd(st);
   if (!h.includes('v0.2.0')) throw new Error('没显示新版本号');
   if (!h.includes('data-act="startUpdate"')) throw new Error('没有更新按钮');
   if (!h.includes('修了两个问题')) throw new Error('没显示更新说明');
@@ -256,11 +277,11 @@ ck('失败时也能看各条线路（连不上时最想知道的就是这个）'
                        error: 'SSL 握手失败' },
                      { id: 'gh-proxy', name: 'gh-proxy.com', ok: true,
                        ms: 800, used: true }] };
-  let h = settings(st);
+  let h = upd(st);
   if (!h.includes('连不上 GitHub')) throw new Error('没说失败原因');
   if (!h.includes('data-act="toggleUpdLines"')) throw new Error('没给看线路的入口');
   st.updLines = true;
-  h = settings(st);
+  h = upd(st);
   if (!h.includes('SSL 握手失败')) throw new Error('展开后没显示每条的结果');
   if (!h.includes('用的这条')) throw new Error('没标出用的哪条');
 });
@@ -269,18 +290,21 @@ ck('下载中显示进度，不顶着 0% 装死', () => {
   const st = ready(sb);
   st.updTask = { state: 'downloading', got: 50, total: 200, step: 'running',
                  via: 'gh-proxy.com' };
-  let h = settings(st);
+  let h = upd(st);
   if (!h.includes('25%')) throw new Error('没显示百分比');
+  // 云端后端给了 got/total，就该画进度条，不能只写个数字
+  if (!h.includes('class="bar"')) throw new Error('没有进度条');
+  if (!h.includes('已下 ')) throw new Error('没显示下了多少');
   // 🔴 挑线路那两秒也得说清楚在干什么
   st.updTask.step = 'probing';
-  h = settings(st);
+  h = upd(st);
   if (!h.includes('挑最快的线路')) throw new Error('测速阶段顶着「下载 0%」装死了');
 });
 
 ck('拿不到校验值要问用户，不硬拦', () => {
   const st = ready(sb);
   st.updTask = { state: 'need_confirm', error: '拿不到 GitHub 给的校验值' };
-  const h = settings(st);
+  const h = upd(st);
   if (!h.includes('data-act="updateAnyway"')) throw new Error('没给「仍然继续」');
   if (!h.includes('拿不到 GitHub 给的校验值')) throw new Error('没说清风险');
 });
@@ -288,10 +312,30 @@ ck('拿不到校验值要问用户，不硬拦', () => {
 ck('装完给重启按钮，并说清必须重启', () => {
   const st = ready(sb);
   st.updTask = { state: 'done', files: 12 };
-  const h = settings(st);
+  const h = upd(st);
   if (!h.includes('data-act="restartApp"')) throw new Error('没有重启按钮');
   if (!h.includes('12 个文件')) throw new Error('没说换了几个文件');
   if (!h.includes('必须重启')) throw new Error('没说清要重启才生效');
+});
+
+ck('跨大版本要重下整包时必须给出路', () => {
+  // 🔴 原先这一支只有一行红字，用户被告知「不行」却不知道该干什么。
+  //    云端不弹浏览器，所以出路是把下载页地址复制给他。
+  const st = ready(sb);
+  // ⚠️ ready() 返回的是同一个 state 对象，updTask 会从上一条测试残留下来 ——
+  //    不清掉的话「装完等重启」那一支排在前面，这里根本走不到。
+  st.updTask = null;
+  st.upd = { has_update: false, need_full: true,
+             error: '跨了大版本，增量包装不上', lines: [] };
+  const h = upd(st);
+  if (!h.includes('跨了大版本')) throw new Error('没说为什么');
+  if (!h.includes('data-act="copyReleaseUrl"')) throw new Error('没给复制地址的出路');
+  if (!h.includes('github.com/kiryusento2017/teach-studio/releases')) {
+    throw new Error('没把地址摆出来给人看');
+  }
+  if (!h.includes('token 和转换历史都在里面')) {
+    throw new Error('没说清重装会不会丢东西 —— 这是用户最担心的');
+  }
 });
 
 ck('注册指南给出地址、复制入口，并说清用量只算本软件的', () => {
@@ -306,6 +350,37 @@ ck('注册指南给出地址、复制入口，并说清用量只算本软件的'
 
 console.log('\n待转清单：');
 
+ck('待转清单要有表头和全选/全不选', () => {
+  // 一批几十份的时候，没有全选就只能一个个点。
+  const st = ready(sb);
+  st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] },
+              { ok: true, path: 'D:/b.pdf', pages: 5, scan_pages: [] }];
+  const h = main(st);
+  if (!h.includes('class="hd"')) throw new Error('没有表头行');
+  if (!h.includes('文件（共 2 份）')) throw new Error('表头没报总份数');
+  if (!h.includes('data-act="selAll"')) throw new Error('没有全选');
+  if (!h.includes('data-act="selNone"')) throw new Error('没有全不选');
+  if (!h.includes('>页数<')) throw new Error('表头没有页数列头');
+});
+
+ck('页数要对齐成一列', () => {
+  // 不给固定宽度的话页数跟着文件名长度飘，几行下来根本对不齐。
+  const st = ready(sb);
+  st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+  const h = main(st);
+  if (!h.includes('width:52px;text-align:right')) {
+    throw new Error('页数没有固定列宽右对齐');
+  }
+});
+
+ck('没勾的那行文件名要变淡', () => {
+  const st = ready(sb);
+  st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+  st.picked = { 'D:/a.pdf': false };
+  const h = main(st);
+  if (!h.includes('grow ell f-dim')) throw new Error('没勾的没调淡，看不出选没选');
+});
+
 ck('空清单给拖拽提示', () => {
   const st = ready(sb);
   const h = main(st);
@@ -319,7 +394,15 @@ ck('列出文件、页数、勾选框', () => {
   const h = main(st);
   if (!h.includes('讲义.pdf')) throw new Error('没列出文件名');
   if (!h.includes('12 页')) throw new Error('没显示页数');
-  if (!h.includes('data-check="D:/讲义.pdf"')) throw new Error('没有勾选框');
+  if (!h.includes('<input type="checkbox"')) throw new Error('没有勾选框');
+  // 点整行都要能勾 —— checkbox 只是显示件（pointer-events:none），
+  // 真正接事件的是行上的 data-act="toggle"
+  if (!h.includes('data-act="toggle" data-arg="D:/讲义.pdf"')) {
+    throw new Error('整行点不了，只能点那 13px 的小方块');
+  }
+  if (!h.includes('pointer-events:none')) {
+    throw new Error('checkbox 没让开点击，会把行的点击吃掉');
+  }
   if (!h.includes('checked')) throw new Error('默认没勾上');
 });
 
@@ -347,10 +430,25 @@ ck('扫描页要提示没有文字层', () => {
   if (!h.includes('没有文字层')) throw new Error('没提示');
 });
 
-ck('一份都没勾就不给开始', () => {
+ck('拖进来默认全勾，直接就能开始', () => {
+  // 🔴 picked 是三态：**键不存在 = 选中**。所以 `picked = {}` 是「全勾」
+  //    而不是「全没勾」—— 用户拖一批进来直接点开始，不用先勾一遍。
   const st = ready(sb);
   st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
   st.picked = {};
+  const h = main(st);
+  if (!h.includes(' checked')) throw new Error('默认没勾上');
+  const i0 = h.indexOf('data-act="start"');
+  const tag0 = h.slice(h.lastIndexOf('<button', i0), h.indexOf('>', i0));
+  if (tag0.includes('disabled')) throw new Error('默认全勾了却不让开始');
+  if (!h.includes('选中 1 份')) throw new Error('底栏没算上默认勾的那份');
+});
+
+ck('一份都没勾就不给开始', () => {
+  const st = ready(sb);
+  st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+  // 三态下「没勾」必须显式写 false，不能用空对象表示
+  st.picked = { 'D:/a.pdf': false };
   const h = main(st);
   const i = h.indexOf('data-act="start"');
   const tag = h.slice(h.lastIndexOf('<button', i), h.indexOf('>', i));
@@ -514,12 +612,121 @@ function done(st, results) {
 }
 
 
+ck('报告每份都列，成功的也给统计和落盘路径', () => {
+  // 🔴 只列有问题的那几份看着清爽，但「没列出来」既可能是干净、也可能是
+  //    被漏了，两种情况长得一样 —— 用户没法拿它核对 Word。
+  const st = ready(sb);
+  st.task = { state: 'done', current: 2, total: 2, now: '', lines: [],
+              results: [
+                { ok: true, pdf: 'D:/a.pdf', docx: 'D:/a.docx', pages: 12,
+                  formulas: 8, formulas_xsl: 8, tables: 2, images: 3,
+                  scan_pages: [], details_dropped: 0 },
+                { ok: false, pdf: 'D:/b.pdf', error: '崩了' }] };
+  st.taskId = '1';
+  st.items = [{ ok: true, path: 'D:/a.pdf', pages: 12, scan_pages: [] },
+              { ok: true, path: 'D:/b.pdf', pages: 4, scan_pages: [] }];
+  st.showReport = true;
+  const h = main(st);
+  if (!h.includes('转换报告')) throw new Error('报告没有标题');
+  if (!h.includes('a.pdf')) throw new Error('成功那份没列出来');
+  if (!h.includes('12 页 · 公式 8/8 · 表 2 · 图 3')) {
+    throw new Error('成功那份没给统计行');
+  }
+  if (!h.includes('存到：D:/a.docx')) throw new Error('没给落盘路径');
+  if (!h.includes('✗ 失败')) throw new Error('失败那份没标记');
+  if (!h.includes('data-act="copyReport"')) throw new Error('没有复制按钮');
+  if (!h.includes('不会存成文件')) throw new Error('没说报告不落盘');
+});
+
+ck('扫描页多的时候只列前 12 个', () => {
+  const many = [];
+  for (let i = 1; i <= 40; i++) many.push(i);
+  const st = ready(sb);
+  st.task = { state: 'done', current: 1, total: 1, now: '', lines: [],
+              results: [{ ok: true, pdf: 'D:/s.pdf', docx: 'D:/s.docx',
+                          pages: 40, formulas: 0, formulas_xsl: 0, tables: 0,
+                          images: 0, scan_pages: many }] };
+  st.taskId = '1';
+  st.items = [{ ok: true, path: 'D:/s.pdf', pages: 40, scan_pages: [] }];
+  st.showReport = true;
+  const h = main(st);
+  if (!h.includes('等 40 页')) throw new Error('没说一共多少页');
+  if (h.includes('、13、')) throw new Error('页号没截断，整份扫描件会刷屏');
+  if (!h.includes('这几页最该核对')) throw new Error('没说为什么要看');
+});
+
+ck('转换中能摊开日志，转完也还能看', () => {
+  // 后端每轮都返回 lines，原先只取最后一行显示 —— 攒了一路的东西没给人看
+  const st = ready(sb);
+  st.task = { state: 'running', current: 0, total: 1, now: '解析中',
+              lines: ['已提交，排队中', '正在解析第 3 页'], results: [] };
+  st.taskId = '1';
+  st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+  let h = main(st);
+  if (!h.includes('data-act="toggleLog"')) throw new Error('没有日志入口');
+
+  st.showLog = true;
+  h = main(st);
+  if (!h.includes('正在解析第 3 页')) throw new Error('日志没摊开');
+  if (!h.includes('class="log"')) throw new Error('没走日志那套深底样式');
+
+  // 转完也要留着 —— 转失败时最想看的就是它
+  st.task.state = 'done';
+  st.showLog = false;
+  h = main(st);
+  if (!h.includes('data-act="toggleLog"')) throw new Error('转完就把日志入口收走了');
+});
+
+ck('日志和报告互斥，不许同时开', () => {
+  const t = mkActs((st) => {
+    st.task = { state: 'done', current: 1, total: 1,
+                results: [{ ok: true, pdf: 'D:/a.pdf' }] };
+    st.showReport = true;
+  });
+  t.acts.toggleLog();
+  if (!t.st.showLog) throw new Error('日志没开');
+  if (t.st.showReport) throw new Error('报告没关，两块会互相盖掉');
+  t.acts.toggleReport();
+  if (t.st.showLog) throw new Error('反过来也要互斥');
+});
+
+ck('「停止」在底栏不在顶栏', () => {
+  // 同一个动作两个软件放两处，是搬漏了不是设计
+  const st = ready(sb);
+  st.task = { state: 'running', current: 0, total: 2, now: '', lines: [],
+              results: [] };
+  st.taskId = '1';
+  st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] },
+              { ok: true, path: 'D:/b.pdf', pages: 4, scan_pages: [] }];
+  const h = main(st);
+  const i = h.indexOf('data-act="stop"');
+  if (i < 0) throw new Error('没有停止按钮');
+  if (i < h.indexOf('chrome-bot')) throw new Error('停止按钮跑到顶栏去了');
+});
+
+ck('有失败的时候要单独说、而且是红的', () => {
+  const st = ready(sb);
+  st.task = { state: 'done', current: 2, total: 2, now: '', lines: [],
+              results: [{ ok: true, pdf: 'D:/a.pdf', docx: 'D:/a.docx' },
+                        { ok: false, pdf: 'D:/b.pdf', error: '崩了' }] };
+  st.taskId = '1';
+  st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] },
+              { ok: true, path: 'D:/b.pdf', pages: 4, scan_pages: [] }];
+  const h = main(st);
+  if (!h.includes('成功 1 份')) throw new Error('没说成功几份');
+  if (!h.includes('f-bad">失败 1 份')) throw new Error('失败份数没标红');
+});
+
 ck('转完给每份的结果和打开入口', () => {
   const h = main(done(ready(sb), [OK1]));
   if (!h.includes('公式是 Word 原生公式')) throw new Error('没显示汇总');
   if (!h.includes('data-act="openFile"')) throw new Error('没有打开入口');
   if (!h.includes('data-act="openFolder"')) throw new Error('没有文件夹入口');
-  if (!h.includes('1 成 / 1 份')) throw new Error('没给这一批的总账');
+  if (!h.includes('全部完成 1 份')) throw new Error('没给这一批的总账');
+  // 统计在底栏，不在顶栏 —— 顶栏只放「在干什么」和动作
+  if (h.indexOf('全部完成 1 份') < h.indexOf('chrome-bot')) {
+    throw new Error('统计跑到顶栏去了');
+  }
 });
 
 ck('用了缓存的那份要标出来', () => {
@@ -700,6 +907,35 @@ ck('体检回来时这批已经转完了，也要自己补一次晋升', async (
   // 🔴 扫一个文件夹要十几秒。等它回来时轮询可能早就拿到 done 了，
   //    而那一刻 pending 还是空的，轮询走的是「没有待办」那条路。
   //    不自己补判断的话，这几份会一直躺着没人管。
+  //
+  //    ⚠️ 时序必须照真实的来：**拖进来的那一刻还在转**（所以走待办），
+  //    体检回来时才发现已经 done。写成「一开始就 done」是另一个场景了
+  //    （那是「转完之后再拖一份」，见下一条），两者判据不同，别混。
+  const t = mkActs((st) => {
+    st.task = { state: 'running', current: 0, total: 1, results: [] };
+    st.taskId = 'T1';
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+    st.picked['D:/a.pdf'] = true;
+  });
+  t.acts.addPaths(['D:/late.pdf']);
+  // 体检请求已经发出去了，回调还没跑 —— 这中间这一批转完了
+  t.st.task = { state: 'done', current: 1, total: 1,
+                results: [{ ok: true, pdf: 'D:/a.pdf' }] };
+  await tick(); await tick(); await tick();
+  if (!t.posted.some((x) => x[0] === '/api/convert')) {
+    throw new Error('体检回来发现已转完，却没有补晋升 —— 那几份会一直躺着');
+  }
+  if (t.st.items[0].path !== 'D:/late.pdf') throw new Error('没晋升成新一批');
+});
+
+ck('转完之后再拖一份进来，不许自动开转', async () => {
+  // 🔴 **这条锁的是花钱的那道口子。** 判「忙不忙」如果用 st.task 真值，
+  //    转完之后它还留着 done 快照 —— 于是新拖进来的被当成「转换中追加」
+  //    塞进待办，体检回来一看这批已 done，自动晋升、自动开转，
+  //    用户一句话没说就掉了额度。判据必须是 isRunning || starting。
+  //
+  //    对照发布说明里既定的原则：中途按停止都不自动起新一批，
+  //    「待办会并回待转清单由你决定」—— 转完了更没理由替用户做主。
   const t = mkActs((st) => {
     st.task = { state: 'done', current: 1, total: 1,
                 results: [{ ok: true, pdf: 'D:/a.pdf' }] };
@@ -709,10 +945,59 @@ ck('体检回来时这批已经转完了，也要自己补一次晋升', async (
   });
   t.acts.addPaths(['D:/late.pdf']);
   await tick(); await tick(); await tick();
-  if (!t.posted.some((x) => x[0] === '/api/convert')) {
-    throw new Error('体检回来发现已转完，却没有补晋升 —— 那几份会一直躺着');
+  if (t.posted.some((x) => x[0] === '/api/convert')) {
+    throw new Error('没等用户发话就自动开转了 —— 白花一次 MinerU 额度');
   }
-  if (t.st.items[0].path !== 'D:/late.pdf') throw new Error('没晋升成新一批');
+  if (!t.st.items.some((x) => x.path === 'D:/late.pdf')) {
+    throw new Error('该进待转清单等命令，结果哪儿都没去');
+  }
+  if (t.st.pending.length) throw new Error('不该进待办，这批已经转完了');
+});
+
+ck('点开始那一瞬拖进来的，要进待办不能进清单', async () => {
+  // 🔴 请求已经发出去、task 还没回来的那段窗口。判据漏了 starting 的话，
+  //    这几份会被当成新的一批塞进 items —— 可这批的 paths 早发出去了，
+  //    它们永远不会被转，界面上却一直显示「未处理」。
+  const t = mkActs((st) => {
+    st.starting = true;
+    st.task = null;
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+    st.picked['D:/a.pdf'] = true;
+  });
+  t.acts.addPaths(['D:/late.pdf']);
+  await tick(); await tick();
+  if (!t.st.pending.some((x) => x.path === 'D:/late.pdf')) {
+    throw new Error('starting 窗口里拖进来的没进待办，那几份会永远躺着');
+  }
+});
+
+ck('「再转一批」留下失败的、不动没转过的', async () => {
+  // 🔴 三件事一起验：
+  //    1. 不清空列表（原先是整个清掉，想重转失败的得重新拖一遍）
+  //    2. 成功的取消勾选、失败的勾上 = 一键重试
+  //    3. **根本没转过的那些一根手指都不许动** —— st.items 里会混着摁停止时
+  //       并回来的待办、晋升时 start() 失败留下的那批，它们不在 results 里。
+  //       一律重设的话用户看到的是「软件把我刚拖进来的东西吃了」。
+  const t = mkActs((st) => {
+    st.task = { state: 'done', current: 2, total: 2,
+                results: [{ ok: true, pdf: 'D:/a.pdf', docx: 'D:/a.docx' },
+                          { ok: false, pdf: 'D:/b.pdf', error: '崩了' }] };
+    st.taskId = 'T1';
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] },
+                { ok: true, path: 'D:/b.pdf', pages: 4, scan_pages: [] },
+                { ok: true, path: 'D:/c.pdf', pages: 5, scan_pages: [] }];
+    st.lastResults = [{ ok: true, pdf: 'D:/old.pdf' }];
+  });
+  t.acts.newBatch();
+  if (t.st.items.length !== 3) throw new Error('列表被清空了');
+  if (t.st.picked['D:/a.pdf'] !== false) throw new Error('成功的没取消勾选');
+  if (t.st.picked['D:/b.pdf'] !== true) throw new Error('失败的没自动勾上');
+  if (t.st.picked['D:/c.pdf'] === false) {
+    throw new Error('没转过的那份被取消勾选了 —— 用户会以为文件被吃了');
+  }
+  if (t.st.lastResults !== null) {
+    throw new Error('lastResults 没清，会隔着一批串味、报告指错批次');
+  }
 });
 
 ck('体检不过的不进待办', () => {
@@ -732,7 +1017,20 @@ ck('没历史时给一句话，不是空白', () => {
   const st = ready(sb);
   st.page = 'history';
   const h = hist(st);
-  if (!h.includes('还没转过东西')) throw new Error('空白页');
+  if (!h.includes('还没有转换记录')) throw new Error('空白页');
+  if (!h.includes('转过的每一份都会记在这儿')) throw new Error('空态没有副标题');
+});
+
+ck('有历史时提示能看完整报错', () => {
+  // 失败那行的完整报错藏在 title 里，不说没人会去悬停
+  const st = ready(sb);
+  st.page = 'history';
+  st.runs = [{ ok: false, pdf: 'D:/a.pdf', file: 'a.pdf',
+               error: '超时', error_full: '连接超时，等了 60 秒',
+               time: '2026-09-09 10:00:00' }];
+  const h = hist(st);
+  if (!h.includes('鼠标停在失败那行上能看完整报错')) throw new Error('没给提示');
+  if (!h.includes('共 1 份')) throw new Error('没报总数');
 });
 
 ck('历史每行能打开产物和文件夹', () => {
@@ -793,8 +1091,13 @@ ck('轮询撞到任务不存在时要停下来', () => {
   // 🔴 匹配 `function poll()` 连括号一起，不能只写 `function poll` ——
   //    那是前缀匹配，2026-09-08 加了检查更新的 `function pollUpd()` 之后
   //    它排在前面，被抓错了目标，这条测试当场红给我看。
+  //    ⚠️ 窗口也不能写死字符数：2026-09-09 给 poll 加了三道防重绘的闸，
+  //    函数一长，404 那段就被挤出原来那 1600 字符的窗口，测试红了但代码
+  //    是对的。改成截到**下一个同级函数**为止，函数多长都盖得住。
   const i = src.indexOf('function poll()');
-  const seg = src.slice(i, i + 1600);
+  const NL = String.fromCharCode(10);
+  const j = src.indexOf(NL + '  function ', i + 10);
+  const seg = src.slice(i, j > i ? j : src.length);
   if (!seg.includes('stopPolling')) throw new Error('404 时不停轮询');
   if (!seg.includes('404')) throw new Error('没有识别 404');
 });
@@ -960,6 +1263,64 @@ ck('数据一变立刻重绘', async () => {
   await t.poll(); await t.poll(); await t.poll(); await t.poll();
   if (t.count() !== 2) {
     throw new Error('该重绘 2 次（第一轮 + 变化那轮），实际 ' + t.count());
+  }
+});
+
+ck('不在主屏时不重绘（在历史页翻记录不该被打断）', async () => {
+  // 🔴 历史 / 设置 / 关于这几屏根本不显示任务状态，每秒重绘一次纯粹是
+  //    把用户的滚动位置往回拽。st.task 照样更新，切回主屏时自然是新的。
+  const a = { state: 'running', current: 0, total: 2, now: 'a.pdf',
+              error: '', lines: ['x'], results: [] };
+  const b = { state: 'running', current: 1, total: 2, now: 'b.pdf',
+              error: '', lines: ['y'], results: [{ ok: true }] };
+  const t = mkPollSandbox([a, b]);
+  t.st.page = 'history';
+  await t.poll(); await t.poll();
+  if (t.count() !== 0) {
+    throw new Error('不在主屏还重绘了 ' + t.count() + ' 次');
+  }
+  if (!t.st.task || t.st.task.current !== 1) {
+    throw new Error('数据也没更新 —— 只是不画，不是不收');
+  }
+});
+
+ck('结构没变就只改那两处文字，整页不动', async () => {
+  // 还在转同一份、只是状态那句话变了 —— 没必要把整页 innerHTML 换掉
+  const a = { state: 'running', current: 0, total: 2, now: '正在解析',
+              error: '', lines: ['第 1 页'], results: [] };
+  const b = { state: 'running', current: 0, total: 2, now: '正在排版',
+              error: '', lines: ['第 2 页'], results: [] };
+  const t = mkPollSandbox([a, b]);
+  // 让抓手「存在」，好让 patchConv 走通（沙箱默认返回 null）
+  const patched = {};
+  t.sb.document.getElementById = (id) => ({
+    set textContent(v) { patched[id] = v; },
+  });
+  await t.poll();          // 第一轮：结构签名还是空的，整页画一次
+  const after1 = t.count();
+  await t.poll();          // 第二轮：结构没变，只 patch
+  if (t.count() !== after1) {
+    throw new Error('结构没变却整页重画了');
+  }
+  if (patched.convnow !== '正在排版') {
+    throw new Error('底栏状态没跟上：' + patched.convnow);
+  }
+  if (patched.convline !== '第 2 页') {
+    throw new Error('当前行那句话没跟上：' + patched.convline);
+  }
+});
+
+ck('抓手不在就老实整页重画', async () => {
+  // patchConv 找不到 convnow（比如正开着报告屏）时必须 falseback，
+  // 不能因为「结构没变」就什么都不做 —— 那样界面会僵在旧状态。
+  const a = { state: 'running', current: 0, total: 2, now: 'a',
+              error: '', lines: ['1'], results: [] };
+  const b = { state: 'running', current: 0, total: 2, now: 'b',
+              error: '', lines: ['2'], results: [] };
+  const t = mkPollSandbox([a, b]);   // 沙箱的 getElementById 恒返回 null
+  await t.poll(); await t.poll();
+  if (t.count() !== 2) {
+    throw new Error('抓手不在时该整页重画 2 次，实际 ' + t.count());
   }
 });
 
