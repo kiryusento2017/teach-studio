@@ -241,6 +241,92 @@ def put_code(out, parts):
     say('业务代码就位')
 
 
+def put_readme(out, version):
+    r"""发行版根目录那份给用户看的说明。
+
+    ⚠️ 这段文字是**用户在软件之外唯一能看到的说明**（Release 页面的发布
+       说明得联网才看得到，而且他们多半是直接拿到一个 zip）。所以两件事
+       必须写在最前面：**放哪儿**、**要准备什么**。
+
+    本地版这份的开头是「要有 N 卡」「要装 Office」，云端版这两条都没了 ——
+    这正是云端版存在的理由。但「别放 C:\Program Files」那条照旧要写：
+    软件运行时要往自己文件夹里写 token、历史、临时文件，放进那儿会写不了。
+    """
+    txt = (
+        'PDF 转 Word · 云端版  __VER__\r\n'
+        '\r\n'
+        '把 PDF 讲义转成 Word。文字、公式、表格、图片都是原生对象，不是截图；\r\n'
+        '公式是 Word 原生公式，可以直接双击编辑、可以被搜索。\r\n'
+        '\r\n'
+        '\r\n'
+        '=== 放哪儿（重要）===\r\n'
+        '\r\n'
+        '把整个文件夹解压到 D 盘之类的地方，比如 D:\\软件\\PDF2Word。\r\n'
+        '\r\n'
+        '⚠ 不要放进 C:\\Program Files —— 那个位置写不了文件。软件要往自己\r\n'
+        '  文件夹里存 token、转换历史和临时文件，放进去会打不开。\r\n'
+        '  （真放进去了软件会告诉你，不会闷着出错。）\r\n'
+        '\r\n'
+        '路径里可以有中文、空格和括号，都验过。\r\n'
+        '\r\n'
+        '\r\n'
+        '=== 怎么用 ===\r\n'
+        '\r\n'
+        '1. 双击「PDF转Word.exe」\r\n'
+        '\r\n'
+        '2. 第一次打开会让你填一个 MinerU 的 API token。去这里注册，免费：\r\n'
+        '\r\n'
+        '       https://mineru.net/apiManage/token\r\n'
+        '\r\n'
+        '   用手机号注册一个账号，在那个页面创建 token，复制回来粘进去。\r\n'
+        '   （设置页里有「复制地址」，粘到浏览器就行。）\r\n'
+        '\r\n'
+        '3. 把 PDF 拖进窗口，点「开始转换」\r\n'
+        '\r\n'
+        '\r\n'
+        '=== 不用装什么 ===\r\n'
+        '\r\n'
+        '  · 不用装 Office（转公式要的那个文件已经打包进来了）\r\n'
+        '  · 不用装 Python、Node.js\r\n'
+        '  · 不用独立显卡\r\n'
+        '\r\n'
+        '转出来的 .docx 用 Word 或 WPS 都能打开。\r\n'
+        '\r\n'
+        '\r\n'
+        '=== 关于额度 ===\r\n'
+        '\r\n'
+        '解析在 MinerU 的服务器上跑，每个账号每天有额度：\r\n'
+        '\r\n'
+        '  · 1000 页优先解析（超了不是不给用，是排队慢一点）\r\n'
+        '  · 5000 个文件\r\n'
+        '\r\n'
+        '不够用的话可以多注册几个号 —— 一个手机号一个，微信还能再注册一个。\r\n'
+        '在设置里点「+ 添加」把它们都填进去，软件会自动挑今天用得少的那个，\r\n'
+        '某个号满了自动换下一个。\r\n'
+        '\r\n'
+        '同一份 PDF 转第二次不重复扣额度（按文件内容记的，换个名字、换个\r\n'
+        '目录也认得出来）。\r\n'
+        '\r\n'
+        '\r\n'
+        '=== 要注意的 ===\r\n'
+        '\r\n'
+        '⚠ 文件会上传到 MinerU 的服务器解析。不能外传的材料别用这个转。\r\n'
+        '\r\n'
+        '⚠ 「停止」只是不再等结果 —— 任务已经交出去了，那边照样跑完、\r\n'
+        '  额度照扣。\r\n'
+        '\r\n'
+        '\r\n'
+        '=== 其他 ===\r\n'
+        '\r\n'
+        '所有东西都在这个文件夹里，不往系统盘塞。不想用了直接删掉整个\r\n'
+        '文件夹就行，转好的 Word 不受影响。\r\n'
+        '\r\n'
+        '要更新的话：设置页最下面点「检查更新」，会自动下载安装。\r\n'
+    ).replace('__VER__', version)
+    io.open(os.path.join(out, '使用说明.txt'), 'w', encoding='utf-8',
+            newline='').write(txt)
+
+
 def write_version(path, tag, sha=''):
     r"""记下这个包是哪个 Release。
 
@@ -362,6 +448,8 @@ def main():
         put_electron(OUT)
         put_node(OUT)
         put_code(OUT, CODE)
+        put_readme(OUT, ver)
+        say('使用说明.txt 就位')
         shutil.copy2(os.path.join(ROOT, VERSION_NAME),
                      os.path.join(OUT, VERSION_NAME))
         shutil.copy2(req_path, os.path.join(OUT, REQUIRES_NAME))
