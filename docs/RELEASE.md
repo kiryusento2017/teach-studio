@@ -121,6 +121,45 @@ for /d /r dist\teach-studio %d in (__pycache__) do @rd /s /q "%d" 2>nul
 
 出 `dist\teach-studio-v0.0.1-update.zip`，约 0.5 MB，几秒钟。
 
+### macOS 包：在 GitHub Actions 上打，不在本机
+
+`.github/workflows/build-macos.yml`，matrix 同时出 Intel 和 Apple Silicon。手动触发：
+
+```
+gh workflow run build-macos.yml --repo kiryusento2017/teach-studio --ref main
+```
+
+打 `v*` 的 tag 也会自动触发。产物是 artifact，保留 30 天，要发 Release 得自己下下来传。
+
+**为什么不能在 Windows 上交叉打**，两条硬理由：
+
+· `pymupdf` / `lxml` 带 C 扩展，pip 装哪个 wheel 由**跑 pip 那台机器的架构**决定
+· `.app` 里的可执行权限位和符号链接，在 Windows 文件系统上组装会丢
+
+CI 里会现搭一套 mac 专用 runtime（仓库里那份装的是 Windows 的 pandoc.exe，用不了）：pandoc 官方 macOS 二进制、python-build-standalone、node 取 runner 上现成的。打完跑冒烟测试——查 .app 里该有的文件在不在、后端能不能 import、写入路径有没有落到 Application Support。
+
+### 🔴 macOS 上的写入路径不是安装目录
+
+`.app` 装进 `/Applications` 之后是**只读**的。Windows 版把 token 和历史写在安装目录旁边，这个做法搬到 mac 上会直接失败。`pipeline/paths.py` 已按平台分流：mac 走 `~/Library/Application Support/teach-studio/`，缓存走 `~/Library/Caches/`。Windows 一字未动，老用户的 token 不受影响。
+
+⚠️ **自更新在 mac 上还没处理** —— `pipeline/update.py` 往 `paths.ROOT` 写，而那是 `.app` 内部。mac 版目前不该让用户点「检查更新」。
+
+### macOS 打包踩过的坑
+
+| | 说明 |
+|---|---|
+| **pandoc 解压目录带架构后缀** | 实测是 `pandoc-3.11-arm64/bin/pandoc`，不是 `pandoc-3.11/bin/pandoc`。写死过一次，两个 job 当场全挂。用 `find` 定位，别写死目录名 |
+| **resources 的大小写** | Electron 在 Windows 上是 `resources`、macOS 上是 `Resources`。`main.js` 里那句大小写敏感的比较在 mac 上永远不匹配，ROOT 算错就找不到 server。而且两边布局也不同：Windows 把 pipeline/server/runtime 摊在安装根，macOS 走 extraResources 落在 `Contents/Resources/` |
+| **dmg 和 zip 打了两遍** | `target: [dmg, zip]` 把同一个 app 打成两份内容相同的包，artifact 白占一倍（508 MB vs 250 MB）。只留一个就够 |
+| **那 88 MB 的 node 是冤枉的** | 单独打包一个 node 二进制进去跑 KaTeX，但 **Electron 本身就内置完整 node**（`ELECTRON_RUN_AS_NODE=1` + `process.execPath`）。Windows 版也背着这笔，两边都能省 |
+| **推 workflow 文件要额外授权** | token 光有 `repo` 不够，得有 `workflow` scope，否则 push 被拒。加权限跑 `gh auth refresh -h github.com -s workflow` |
+| **包没签名没公证** | 用户首次打开会被 Gatekeeper 拦，要在「设置 → 隐私与安全性」点"仍要打开"，或者跑 `xattr -rd com.apple.quarantine`。要免掉这步得买 Apple Developer（99 美元/年）配证书再开 notarize |
+| **Intel runner 有死期** | `macos-13` 已于 2025-11 退役，现在用 `macos-15-intel`，它是 GitHub 最后一个 x86_64 镜像，**2027-08 到期**，之后只剩 arm64 |
+
+### macOS 包的体积账
+
+单个包约 250 MB。大头是 Electron（未压缩约 380 MB）和 pandoc（未压缩 115.9 MB），加上 node 88 MB、Python 运行时和六个依赖 70-100 MB，未压缩合计约 660 MB，压成 dmg 后 250 MB 左右。
+
 ---
 
 ## 三、命名规矩
