@@ -68,9 +68,14 @@ jobs:
           curl -fsSL -o /tmp/pandoc.zip \
             "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-${{ matrix.pandoc_arch }}-macOS.zip"
           unzip -q /tmp/pandoc.zip -d /tmp/pandoc
-          cp "/tmp/pandoc/pandoc-${PANDOC_VER}/bin/pandoc" runtime-mac/pandoc/pandoc
+          # 🔴 别写死解压出来的目录名。实测是 pandoc-3.11-arm64/ 带架构后缀，
+          #    不是 pandoc-3.11/ —— 写死过一次，CI 当场挂在这行。用 find 定位。
+          PANDOC_BIN=$(find /tmp/pandoc -type f -name pandoc -print -quit)
+          test -n "$PANDOC_BIN"
+          cp "$PANDOC_BIN" runtime-mac/pandoc/pandoc
           chmod +x runtime-mac/pandoc/pandoc
-          cp "/tmp/pandoc/pandoc-${PANDOC_VER}/COPYRIGHT.txt" runtime-mac/pandoc/ || true
+          PANDOC_COPY=$(find /tmp/pandoc -type f -name 'COPYRIGHT*' -print -quit)
+          if [ -n "$PANDOC_COPY" ]; then cp "$PANDOC_COPY" runtime-mac/pandoc/; fi
 
           # XSL：转公式用的，仓库里有，跟 Windows 版同一份
           cp runtime/xsl/MML2OMML.XSL runtime-mac/xsl/
