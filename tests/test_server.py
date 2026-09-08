@@ -1328,3 +1328,132 @@ class Test更新模块(unittest.TestCase):
         self.assertEqual(update.check_requires('不是 json'), [])
         miss = update.check_requires('{"requires": {"绝对没装的包": "1.0"}}')
         self.assertTrue(any('没装' in m for m in miss))
+
+
+class Test产物缓存(unittest.TestCase):
+    r"""同一份 PDF 转第二次，不再传一遍、不再扣一次额度。
+
+    抄本地版 extract.py 的「指纹分桶」，但收益不同：那边命中缓存省的是
+    四分钟 GPU，这边省的是**真金白银的页数额度**。
+    """
+
+    def setUp(self):
+        import mineru_api
+        self.api = mineru_api
+        self.w = tempfile.mkdtemp(prefix='p2wk_')
+        self._cache = mineru_api.CACHE_DIR
+        mineru_api.CACHE_DIR = os.path.join(self.w, 'cache')
+        self.pdf = os.path.join(self.w, 'a.pdf')
+        io.open(self.pdf, 'wb').write(b'%PDF-1.4 fake content here')
+
+    def tearDown(self):
+        self.api.CACHE_DIR = self._cache
+        shutil.rmtree(self.w, ignore_errors=True)
+
+    def _make_bucket(self, pdf=None):
+        """手搓一个「上次转过」的桶。"""
+        fp = self.api.fingerprint(pdf or self.pdf)
+        b = os.path.join(self.api.CACHE_DIR, fp)
+        os.makedirs(os.path.join(b, 'images'), exist_ok=True)
+        io.open(os.path.join(b, 'full.md'), 'w', encoding='utf-8').write('# 上次的结果')
+        self.api._cache_note(b, pdf or self.pdf, fp)
+        return b
+
+    # ── 指纹 ──────────────────────────────────────────────────────────
+
+    def test_同一份文件算两次一样(self):
+        self.assertEqual(self.api.fingerprint(self.pdf),
+                         self.api.fingerprint(self.pdf))
+
+    def test_内容不同指纹就不同(self):
+        other = os.path.join(self.w, 'b.pdf')
+        io.open(other, 'wb').write(b'%PDF-1.4 something else')
+        self.assertNotEqual(self.api.fingerprint(self.pdf),
+                            self.api.fingerprint(other))
+
+    def test_换个文件名和目录不影响指纹(self):
+        r"""🔴 这条就是作者问的那个场景：两个完全一样的文件、不同目录、
+        不同文件名 —— 指纹必须一样，才能命中同一个桶、不重复扣额度。"""
+        sub = os.path.join(self.w, '别的目录')
+        os.makedirs(sub, exist_ok=True)
+        other = os.path.join(sub, '改了个名.pdf')
+        shutil.copyfile(self.pdf, other)
+        self.assertEqual(self.api.fingerprint(self.pdf),
+                         self.api.fingerprint(other))
+
+    def test_提交参数变了指纹就变(self):
+        r"""🔴 参数进指纹，所以改了 is_ocr 之类的东西**旧缓存自动失效**，
+        不需要另写一套失效逻辑。"""
+        before = self.api.fingerprint(self.pdf)
+        old = self.api.IS_OCR
+        try:
+            self.api.IS_OCR = not old
+            self.assertNotEqual(before, self.api.fingerprint(self.pdf))
+        finally:
+            self.api.IS_OCR = old
+
+    # ── 命中 ──────────────────────────────────────────────────────────
+
+    def test_命中就不联网(self):
+        r"""🔴 这条是整个缓存的意义所在：**一个网络请求都不该发出去**。"""
+        self._make_bucket()
+        called = []
+        old_post, old_get = self.api.requests.post, self.api.requests.get
+        self.api.requests.post = lambda *a, **k: called.append('post')
+        self.api.requests.get = lambda *a, **k: called.append('get')
+        try:
+            r = self.api.run(self.pdf, os.path.join(self.w, 'out'), 'sk-x')
+        finally:
+            self.api.requests.post, self.api.requests.get = old_post, old_get
+        self.assertTrue(r['ok'], r['error'])
+        self.assertTrue(r['cached'])
+        self.assertEqual(called, [], '命中缓存却还发了网络请求')
+
+    def test_命中时不算提交过所以不记账(self):
+        r"""🔴 `submitted` 保持 False —— convert 那边靠它决定记不记账。
+        没传给服务端，自然没扣额度，记了就是凭空多算。"""
+        self._make_bucket()
+        old_post = self.api.requests.post
+        self.api.requests.post = lambda *a, **k: None
+        try:
+            r = self.api.run(self.pdf, os.path.join(self.w, 'out'), 'sk-x')
+        finally:
+            self.api.requests.post = old_post
+        self.assertFalse(r['submitted'], '命中缓存却标成提交过了')
+
+    def test_命中给出的路径能用(self):
+        b = self._make_bucket()
+        r = self.api.run(self.pdf, os.path.join(self.w, 'out'), 'sk-x')
+        self.assertTrue(os.path.isfile(r['md']))
+        self.assertEqual(os.path.abspath(r['auto_dir']), os.path.abspath(b))
+
+    def test_只有指纹文件没有md不算命中(self):
+        r"""桶建了一半（比如上次解压到中途崩了）不能当成有效缓存。"""
+        fp = self.api.fingerprint(self.pdf)
+        b = os.path.join(self.api.CACHE_DIR, fp)
+        os.makedirs(b, exist_ok=True)
+        self.api._cache_note(b, self.pdf, fp)
+        self.assertEqual(self.api._cache_hit(b), '')
+
+    def test_只有md没有指纹文件也不算命中(self):
+        fp = self.api.fingerprint(self.pdf)
+        b = os.path.join(self.api.CACHE_DIR, fp)
+        os.makedirs(b, exist_ok=True)
+        io.open(os.path.join(b, 'full.md'), 'w', encoding='utf-8').write('x')
+        self.assertEqual(self.api._cache_hit(b), '')
+
+    # ── 清理 ──────────────────────────────────────────────────────────
+
+    def test_清掉太老的桶留下新的(self):
+        old_b = self._make_bucket()
+        os.utime(old_b, (time.time() - 40 * 86400,) * 2)
+        other = os.path.join(self.w, 'b.pdf')
+        io.open(other, 'wb').write(b'%PDF-1.4 fresh one')
+        new_b = self._make_bucket(other)
+        self.assertEqual(self.api.purge_cache(days=10), 1)
+        self.assertFalse(os.path.isdir(old_b))
+        self.assertTrue(os.path.isdir(new_b))
+
+    def test_清理永不抛异常(self):
+        self.api.CACHE_DIR = os.path.join(self.w, '根本不存在的目录')
+        self.assertEqual(self.api.purge_cache(), 0)   # 不该抛

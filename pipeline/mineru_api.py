@@ -37,6 +37,8 @@ r"""MinerU 云端解析。**这是本项目唯一的新代码**，其余都是�
 """
 import io
 import json
+import hashlib
+import json
 import os
 import shutil
 import time
@@ -47,6 +49,32 @@ import requests
 import paths
 
 BASE = 'https://mineru.net/api/v4'
+
+# ── 提交参数 ───────────────────────────────────────────────────────────
+#
+# 🔴 **提成常量是为了让它们能进缓存指纹。** 改了任何一个，指纹就变，
+#    旧缓存自动失效、重新解析 —— 不用另写一套「缓存失效」逻辑
+#    （本地版 extract.py 同一个做法）。
+MODEL_VERSION = 'vlm'
+LANGUAGE = 'ch'
+ENABLE_FORMULA = True
+ENABLE_TABLE = True
+
+# 🔴 **必须开 OCR。** 本地版 docs/DESIGN.md 第二节的实测表
+# （同一份 PDF 跑三种模式）：
+#
+#     模式   正文字符  行内公式
+#     txt     10187      131
+#     auto    10187      131
+#     ocr      8972      213   ← 多 82 个
+#
+# 原因是**文字层里没有公式**：原文那句「已知不等式 [空] 的解集为」
+# 中间就是空的，不 OCR 就直接放弃，OCR 才把那些图形化的公式识别成
+# LaTeX。多花 40 秒换 82 个公式，值。
+#
+# 这个参数在服务端默认是 false —— 2026-09-08 之前这里就是 false，
+# 作者拿同一份讲义两版对比，云端比本地少 30% 公式、少 78% 表格，正是这条。
+IS_OCR = True
 
 # 单次提交的硬上限，来自官方文档。超了在体检那步就拦下来，
 # 不要等传完 200 MB 才被服务端拒绝。
@@ -138,10 +166,11 @@ def _submit(pdf, token, on_log=None):
     name = os.path.basename(pdf)
     r = requests.post(BASE + '/file-urls/batch', headers=_headers(token),
                       timeout=60, json={
-                          'enable_formula': True,
-                          'enable_table': True,
-                          'model_version': 'vlm',
-                          'files': [{'name': name, 'is_ocr': False}],
+                          'enable_formula': ENABLE_FORMULA,
+                          'enable_table': ENABLE_TABLE,
+                          'model_version': MODEL_VERSION,
+                          'language': LANGUAGE,
+                          'files': [{'name': name, 'is_ocr': IS_OCR}],
                       })
     if r.status_code == 401:
         raise ApiError('token 不对')
@@ -228,6 +257,97 @@ def _fetch(zip_url, out_dir, on_log=None):
     return os.path.join(out_dir, mds[0]), out_dir
 
 
+# ── 产物缓存 ───────────────────────────────────────────────────────────
+#
+# 同一份 PDF 用同一组参数转第二次，没道理再传一遍、再扣一次额度。
+# 产物按**内容指纹**分桶：
+#
+#     _tmp/cache/<指纹16位>/full.md
+#                          images/
+#                          .fingerprint.json
+#
+# 指纹 = sha256(PDF 内容) + 提交参数。
+#
+# 🔴 **不能按文件名分桶。** 两份不同内容的「讲义.pdf」会落在同一个位置
+#    互相覆盖；你把 PDF 改了重新导出、名字没变，也会拿到旧产物 ——
+#    那种错最难查，因为界面上一切正常。（本地版原话，同一条教训。）
+#
+# 🔴 **命中缓存不算「提交过」**，所以 convert 那边不会记账 ——
+#    没传给服务端，自然没扣额度。这一点比本地版更要紧：那边省的是
+#    四分钟 GPU，这边省的是真金白银的页数。
+CACHE_DIR = os.path.join(paths.TMP, 'cache')
+CACHE_DAYS = 10
+FP_NAME = '.fingerprint.json'
+
+
+def fingerprint(pdf):
+    """这份 PDF + 这组提交参数的唯一标识（16 位十六进制）。
+
+    分块读，几十 MB 的 PDF 也只占 1 MB 内存、几十毫秒 —— 相对于一趟
+    上传加云端解析可以忽略。
+    """
+    h = hashlib.sha256()
+    with io.open(pdf, 'rb') as f:
+        while True:
+            blk = f.read(1024 * 1024)
+            if not blk:
+                break
+            h.update(blk)
+    tail = '|%s|%s|%s|%s|%s' % (MODEL_VERSION, LANGUAGE, IS_OCR,
+                                ENABLE_FORMULA, ENABLE_TABLE)
+    h.update(tail.encode('utf-8'))
+    return h.hexdigest()[:16]
+
+
+def _cache_hit(bucket):
+    """这个桶里有没有能用的产物。返回 md 路径，没有就是空串。"""
+    if not os.path.isfile(os.path.join(bucket, FP_NAME)):
+        return ''
+    try:
+        names = os.listdir(bucket)
+    except OSError:
+        return ''
+    for n in names:
+        if n.lower().endswith('.md'):
+            return os.path.join(bucket, n)
+    return ''
+
+
+def _cache_note(bucket, pdf, fp):
+    """记下这个桶是怎么来的。写不成不影响转换，只是下次不认这个桶。"""
+    try:
+        with io.open(os.path.join(bucket, FP_NAME), 'w', encoding='utf-8') as f:
+            json.dump({'fp': fp, 'pdf': os.path.basename(pdf),
+                       'params': {'model_version': MODEL_VERSION,
+                                  'language': LANGUAGE, 'is_ocr': IS_OCR,
+                                  'enable_formula': ENABLE_FORMULA,
+                                  'enable_table': ENABLE_TABLE},
+                       'at': time.strftime('%Y-%m-%d %H:%M:%S')},
+                      f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def purge_cache(days=CACHE_DAYS):
+    """清掉好久没碰过的桶。**永不抛异常** —— 清理失败不该影响转换。"""
+    try:
+        if not os.path.isdir(CACHE_DIR):
+            return 0
+        cut = time.time() - days * 86400
+        n = 0
+        for name in os.listdir(CACHE_DIR):
+            d = os.path.join(CACHE_DIR, name)
+            try:
+                if os.path.isdir(d) and os.path.getmtime(d) < cut:
+                    shutil.rmtree(d, ignore_errors=True)
+                    n += 1
+            except OSError:
+                continue
+        return n
+    except Exception:
+        return 0
+
+
 def run(pdf, out_dir, token, on_log=None, stop_flag=None):
     r"""解析一份 PDF。**不抛异常** —— 一份失败不能带倒整批。
 
@@ -240,11 +360,28 @@ def run(pdf, out_dir, token, on_log=None, stop_flag=None):
     （`taskkill /T /F` 当场杀掉）有本质区别，界面上不要承诺能停。
     """
     rep = {'ok': False, 'error': '', 'md': '', 'auto_dir': '', 'cancelled': False,
-           'code': None, 'quota': False, 'submitted': False}
+           'code': None, 'quota': False, 'submitted': False, 'cached': False}
     try:
         if not os.path.isfile(pdf):
             rep['error'] = '文件不见了'
             return rep
+
+        # ── 先看缓存 ──────────────────────────────────────────────────
+        # 顺手清掉太老的桶。清理失败自己吞掉，不影响转换。
+        purge_cache()
+        fp = fingerprint(pdf)
+        bucket = os.path.join(CACHE_DIR, fp)
+        md = _cache_hit(bucket)
+        if md:
+            # 🔴 **不上传、不扣额度。** submitted 保持 False，
+            #    convert 那边就不会记账 —— 因为确实没消耗。
+            if on_log:
+                on_log('这份转过（内容和参数都没变），直接用上次的结果，'
+                       '不占额度')
+            rep['ok'], rep['md'], rep['auto_dir'] = True, md, bucket
+            rep['cached'] = True
+            return rep
+
         size = os.path.getsize(pdf)
         if size > MAX_BYTES:
             rep['error'] = ('这份 %.0f MB，超过云端单次 %d MB 的上限'
@@ -255,7 +392,10 @@ def run(pdf, out_dir, token, on_log=None, stop_flag=None):
         #    上层靠这个标记记账 —— 只有连提交都没成功才不算数。
         rep['submitted'] = True
         url = _wait(bid, token, on_log=on_log, stop_flag=stop_flag)
-        md, auto = _fetch(url, out_dir, on_log=on_log)
+        # 🔴 **解压进缓存桶，不是任务目录。** 下次同一份文件直接命中，
+        #    不用再传一趟、再扣一次额度。
+        md, auto = _fetch(url, bucket, on_log=on_log)
+        _cache_note(bucket, pdf, fp)
         rep['ok'], rep['md'], rep['auto_dir'] = True, md, auto
         return rep
     except ApiError as e:
