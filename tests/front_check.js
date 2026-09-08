@@ -682,6 +682,39 @@ ck('转换中新拖进来的才显示在下面，而且能加进队列', () => {
   if (!h.includes('data-act="appendQueue"')) throw new Error('加不进队列');
 });
 
+ck('转完要把用量也刷一遍，不只刷历史', async () => {
+  // 🔴 账是**后端在提交那一刻就记好了**的（convert.py 的 note_pages），
+  //    但界面上「今天用了 X 页」那个数字来自 /api/env。转完不重新拉
+  //    一次的话，底栏还显示转之前的数，得进一趟设置页才更新 ——
+  //    账准、显示滞后，这种落差最容易让人以为没记上。
+  const sb = mkSandbox();
+  const st = ready(sb);
+  st.taskId = 'T1';
+  const asked = [];
+  sb.window.P2W_RENDER = () => {};
+  sb.window.P2W_HTTP = {
+    get: (p) => {
+      asked.push(p);
+      if (p.indexOf('/api/convert/') === 0) {
+        return Promise.resolve({ state: 'done', current: 1, total: 1,
+                                 now: '', error: '', lines: [], queued: [],
+                                 results: [] });
+      }
+      if (p === '/api/env') return Promise.resolve(st.env);
+      return Promise.resolve({ rows: [] });
+    },
+    post: () => Promise.resolve({}),
+  };
+  vm.runInContext(R('app/renderer/actions.js'), sb);
+
+  sb.window.P2W_ACTS.__poll();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  if (asked.indexOf('/api/runs') < 0) throw new Error('没刷新历史');
+  if (asked.indexOf('/api/env') < 0) throw new Error('没刷新用量');
+});
+
 ck('actions 暴露了 poll 供测试驱动', () => {
   const src = R('app/renderer/actions.js');
   if (src.indexOf('__poll') < 0) {

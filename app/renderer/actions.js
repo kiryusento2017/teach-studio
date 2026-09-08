@@ -134,11 +134,17 @@
       st.task = d;
       if (d.state === 'done' || d.state === 'cancelled') {
         stopPolling();
-        // 转完刷新历史
+        // 转完刷新两样：转换历史，和各个 token 的今日用量。
+        //
+        // 🔴 用量**后端在提交那一刻就记好了**（见 convert.py 的
+        //    note_pages），但界面上那个数字来自 /api/env —— 不重新拉
+        //    一次的话，底栏还显示转之前的数，得进一趟设置页才更新。
+        //    账是准的、显示是滞后的，这种落差最容易让人以为没记上。
         HTTP.get('/api/runs').then(function (r) {
           st.runs = (r && r.rows) || [];
           render();
         }).catch(function () { render(); });
+        refreshEnv();
         return;
       }
       // 跟上一轮一模一样就别动 DOM —— 见上面 lastSig 那段。
