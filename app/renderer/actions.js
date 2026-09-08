@@ -623,12 +623,32 @@
         if (!r.ok) failed[r.pdf] = true;
       });
 
-      // 🔴 **只重设这一批真转过的那些。** st.items 里可能混着根本没转过的
+      // 🔴 **转成功的移出列表，转失败的留下并勾上。**
+      //
+      //    Word 已经在硬盘上了，成功的那几份留在待转清单里没有用处，
+      //    而且它们跟没转过的长得一模一样（都是没勾的白底行），
+      //    看着就像「已经转完的还堵在队列里」。失败的留下并勾好，
+      //    才是「再转一批」这个按钮真正的价值 —— 直接点开始就是重试。
+      //
+      //    🔴 **只碰这一批真转过的。** st.items 里可能混着根本没转过的
       //    文件：摁停止时并回来的待办、晋升时 start() 失败留下的那批。
-      //    它们在 results 里没有记录，一律重设的话会被取消勾选 ——
+      //    它们在 results 里没有记录，一律处理的话会被误删 ——
       //    用户看到的是「软件把我刚拖进来的东西吃了」。
+      //
+      //    🔴 **移除的同时必须 delete picked。** picked 是三态，键不存在
+      //    才等于选中。只删列表不删键的话，那个 false 会留着；等同一份
+      //    PDF 哪天又被拖进来，它就默认不勾了 —— 跟「拖进来默认全勾」
+      //    直接打架，而且只在「转过 → 再拖一次」时才现形，极难查。
+      //    （removeOne 里是同一个道理，那儿也 delete。）
+      st.items = st.items.filter(function (x) {
+        if (ran[x.path] && !failed[x.path]) {
+          delete st.picked[x.path];
+          return false;
+        }
+        return true;
+      });
       st.items.forEach(function (x) {
-        if (ran[x.path]) st.picked[x.path] = !!failed[x.path];
+        if (failed[x.path]) st.picked[x.path] = true;
       });
 
       st.task = null;

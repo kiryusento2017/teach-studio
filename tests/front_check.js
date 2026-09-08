@@ -971,13 +971,14 @@ ck('点开始那一瞬拖进来的，要进待办不能进清单', async () => {
   }
 });
 
-ck('「再转一批」留下失败的、不动没转过的', async () => {
-  // 🔴 三件事一起验：
-  //    1. 不清空列表（原先是整个清掉，想重转失败的得重新拖一遍）
-  //    2. 成功的取消勾选、失败的勾上 = 一键重试
-  //    3. **根本没转过的那些一根手指都不许动** —— st.items 里会混着摁停止时
-  //       并回来的待办、晋升时 start() 失败留下的那批，它们不在 results 里。
-  //       一律重设的话用户看到的是「软件把我刚拖进来的东西吃了」。
+ck('「再转一批」移走成功的、留下失败的、不动没转过的', async () => {
+  // 🔴 四件事一起验：
+  //    1. 转成功的**移出列表** —— Word 已经在硬盘上了，留在待转清单里
+  //       跟没转过的长得一模一样（都是没勾的白底行），看着像还堵在队列里
+  //    2. 转失败的留下并勾上 = 一键重试，这才是这个按钮的价值
+  //    3. **根本没转过的一根手指都不许动** —— st.items 里会混着摁停止时
+  //       并回来的待办、晋升时 start() 失败留下的那批，它们不在 results 里
+  //    4. 移走的同时把 picked 里的键删掉，理由见下一条
   const t = mkActs((st) => {
     st.task = { state: 'done', current: 2, total: 2,
                 results: [{ ok: true, pdf: 'D:/a.pdf', docx: 'D:/a.docx' },
@@ -989,14 +990,44 @@ ck('「再转一批」留下失败的、不动没转过的', async () => {
     st.lastResults = [{ ok: true, pdf: 'D:/old.pdf' }];
   });
   t.acts.newBatch();
-  if (t.st.items.length !== 3) throw new Error('列表被清空了');
-  if (t.st.picked['D:/a.pdf'] !== false) throw new Error('成功的没取消勾选');
+  if (t.st.items.some(function (x) { return x.path === 'D:/a.pdf'; })) {
+    throw new Error('转成功的没移走，还堵在待转清单里');
+  }
+  if (t.st.items.length !== 2) {
+    throw new Error('移多了或移少了，剩 ' + t.st.items.length + ' 份');
+  }
+  if ('D:/a.pdf' in t.st.picked) {
+    throw new Error('移走了却把 picked 的键留着 —— 见下一条');
+  }
   if (t.st.picked['D:/b.pdf'] !== true) throw new Error('失败的没自动勾上');
   if (t.st.picked['D:/c.pdf'] === false) {
-    throw new Error('没转过的那份被取消勾选了 —— 用户会以为文件被吃了');
+    throw new Error('没转过的那份被动了 —— 用户会以为文件被吃了');
   }
   if (t.st.lastResults !== null) {
     throw new Error('lastResults 没清，会隔着一批串味、报告指错批次');
+  }
+});
+
+ck('移走的时候必须把 picked 的键一起删掉', async () => {
+  // 🔴 picked 是三态：**键不存在才等于选中**。移走文件只删列表、不删键的话，
+  //    那个 false 会一直留着；等同一份 PDF 哪天又被拖进来，它就默认不勾，
+  //    跟「拖进来默认全勾」直接打架，而且只在「转过 → 再拖一次」时才现形。
+  //
+  //    ⚠️ 云端眼下有个巧合的补救：addPaths 里有 `if (x.ok) picked[x.path] = true`，
+  //    会把残留值盖掉。本地版的 addPaths **不设**，全靠三态 —— 所以那边是真
+  //    会中招。这条测的是「移走时清干净」这个约定本身，不指望 addPaths 兜底。
+  const t = mkActs((st) => {
+    st.task = { state: 'done', current: 1, total: 1,
+                results: [{ ok: true, pdf: 'D:/a.pdf', docx: 'D:/a.docx' }] };
+    st.taskId = 'T1';
+    st.items = [{ ok: true, path: 'D:/a.pdf', pages: 3, scan_pages: [] }];
+  });
+  t.acts.newBatch();
+  if (t.st.picked['D:/a.pdf'] === false) {
+    throw new Error('picked 里留了个 false，同一份再拖进来会默认不勾');
+  }
+  if (Object.keys(t.st.picked).length !== 0) {
+    throw new Error('picked 没清干净，剩：' + Object.keys(t.st.picked).join(','));
   }
 });
 
