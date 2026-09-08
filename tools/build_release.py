@@ -125,6 +125,27 @@ REQUIRES_NAME = 'requires.json'
 VERSION_NAME = 'version.json'
 
 
+def git_state():
+    r"""HEAD 的 sha 和工作区脏不脏。
+
+    🔴 这两样都是 `docs/RELEASE.md` 明文要求的，2026-09-09 发 v0.0.1 时
+       发现**规矩写了、代码没做**：version.json 里的 sha 一直是空串，
+       而那份文档写着「排查问题时以 version.json 里的 sha 为准，别信 tag」。
+       一份说了谎的文档比没有更糟。
+    """
+    sha = dirty = ''
+    try:
+        p = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
+                           stdout=subprocess.PIPE, timeout=10)
+        sha = p.stdout.decode('ascii', 'ignore').strip()
+        q = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT,
+                           stdout=subprocess.PIPE, timeout=20)
+        dirty = q.stdout.decode('utf-8', 'replace').strip()
+    except Exception:
+        pass
+    return sha, dirty
+
+
 def say(msg):
     print('  ' + msg, flush=True)
 
@@ -369,7 +390,7 @@ def _zip_dir(src, zf, base=''):
             zf.write(p, os.path.join(base, rel) if base else rel)
 
 
-def make_update_zip(version):
+def make_update_zip(version, sha=''):
     """打业务代码更新包。用户下载后解压覆盖即可。"""
     os.makedirs(DIST, exist_ok=True)
     out = os.path.join(DIST, '%s-%s-update.zip' % (REPO_NAME, version))
@@ -378,7 +399,7 @@ def make_update_zip(version):
     tmp = os.path.join(DIST, '_update_tmp')
     rm(tmp)
     os.makedirs(tmp)
-    write_version(os.path.join(ROOT, VERSION_NAME), version)
+    write_version(os.path.join(ROOT, VERSION_NAME), version, sha)
     put_code(tmp, UPDATE_PARTS)
     # 依赖清单也进更新包 —— 客户端解压之后、覆盖之前再验一道
     write_requires(os.path.join(tmp, REQUIRES_NAME))
@@ -530,6 +551,9 @@ def main():
     ap.add_argument('--version', required=True, help='例如 v0.0.1')
     ap.add_argument('--update-only', action='store_true',
                     help='只打更新包，不组装完整发行版（快，几秒）')
+    ap.add_argument('--dirty', action='store_true',
+                    help='工作区有未提交改动也照打。'
+                         '⚠️ 这会让 version.json 里的 sha 变成空串')
     ap.add_argument('--sfx', action='store_true',
                     help='把已组装好的 dist/teach-studio 做成自解压 exe，'
                          '不重新组装（组装过一次之后用这个，省几分钟）')
@@ -541,10 +565,30 @@ def main():
     ver = a.version if a.version.startswith('v') else ('v' + a.version)
     os.makedirs(DIST, exist_ok=True)
 
+    # 🔴 **工作区不干净就别打包。**
+    #
+    #    version.json 里记的是 HEAD 的 sha，而 docs/RELEASE.md 写着
+    #    「排查问题时以 version.json 里的 sha 为准，别信 tag」——
+    #    有未提交改动的话那个 sha 就是在说谎：包里的代码根本不是那个 commit。
+    #    真出问题时，拿那个 sha checkout 出来的跟用户手里跑的不是一回事。
+    sha, dirty = git_state()
+    if dirty and not a.dirty:
+        print('工作区有未提交的改动，打包会让 version.json 里的 sha 说谎：',
+              flush=True)
+        for line in dirty.splitlines()[:10]:
+            print('    ' + line, flush=True)
+        raise SystemExit('先提交（或 git stash），'
+                         '或者明确加 --dirty 强行打包。')
+    if dirty:
+        say('⚠️ 带着未提交改动打包，version.json 里的 sha 不可信')
+        sha = ''
+
     print('打包 %s' % ver, flush=True)
+    if sha:
+        print('  commit %s' % sha[:12], flush=True)
     print('=' * 56, flush=True)
 
-    up = make_update_zip(ver)
+    up = make_update_zip(ver, sha)
     req_path = os.path.join(DIST, REQUIRES_NAME)
     req = write_requires(req_path)
     say('依赖清单：%s' % ', '.join('%s %s' % kv for kv in req.items()))
